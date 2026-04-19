@@ -13,6 +13,7 @@ interface Props {
 }
 
 // ── Location lookup ───────────────────────────────────────────────────────────
+// Quick fallback table for common cities — Nominatim geocoding is the primary source.
 const LOCATION_COORDS: Record<string, [number, number]> = {
   "new york": [-73.985, 40.748], "nyc": [-73.985, 40.748],
   "manhattan": [-73.97, 40.776], "brooklyn": [-73.944, 40.678],
@@ -31,10 +32,41 @@ const LOCATION_COORDS: Record<string, [number, number]> = {
 
 function getCoords(loc: string, fb: [number, number]): [number, number] {
   if (!loc) return fb;
+  // Pattern: "<name> @ lat,lon" — appended by LocationInput when a real address is picked
+  const tagged = loc.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
+  if (tagged) {
+    const lat = parseFloat(tagged[1]);
+    const lon = parseFloat(tagged[2]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lon, lat];
+  }
+  // Pattern: bare "lat,lon"
+  const bare = loc.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
+  if (bare) {
+    const lat = parseFloat(bare[1]);
+    const lon = parseFloat(bare[2]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lon, lat];
+  }
   const k = loc.toLowerCase().trim();
   for (const [key, val] of Object.entries(LOCATION_COORDS)) {
     if (k.includes(key)) return val;
   }
+  return fb;
+}
+
+// Async geocoder — uses Nominatim for any unknown address.
+async function geocode(loc: string, fb: [number, number]): Promise<[number, number]> {
+  const synchronous = getCoords(loc, fb);
+  // If sync resolved to something other than fallback, use it
+  if (synchronous[0] !== fb[0] || synchronous[1] !== fb[1]) return synchronous;
+  if (!loc.trim()) return fb;
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(loc)}`;
+    const res = await fetch(url, { headers: { "Accept-Language": "en" } });
+    const arr = await res.json();
+    if (Array.isArray(arr) && arr[0]?.lat && arr[0]?.lon) {
+      return [parseFloat(arr[0].lon), parseFloat(arr[0].lat)];
+    }
+  } catch { /* network errors fall back */ }
   return fb;
 }
 
