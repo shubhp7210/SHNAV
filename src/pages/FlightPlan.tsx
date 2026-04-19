@@ -125,6 +125,28 @@ function toMinutes(t: string): number {
   return h * 60 + m;
 }
 
+function getSettledFunctionData<T>(
+  functionName: string,
+  result: PromiseSettledResult<{ data: T | null; error: { message?: string } | null }>,
+  errors: string[]
+): T | null {
+  if (result.status === "rejected") {
+    const message = `${functionName}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`;
+    console.error(`[ATM] ${message}`);
+    errors.push(message);
+    return null;
+  }
+
+  if (result.value.error) {
+    const message = `${functionName}: ${result.value.error.message ?? "Unknown function error"}`;
+    console.error(`[ATM] ${message}`);
+    errors.push(message);
+    return null;
+  }
+
+  return result.value.data;
+}
+
 const FlightPlan = () => {
   const { user } = useAuth();
   const isLoggedIn = !!user;
@@ -160,6 +182,16 @@ const FlightPlan = () => {
   };
 
   const runATMEngines = async (intentId: string | null, tScore: number, wRisk: string, cCount: number, rData: RouteOptimizerResult | null) => {
+    console.info("[ATM] starting decision pipeline", {
+      intentId,
+      aircraftId: data.aircraftId,
+      origin: data.origin,
+      destination: data.destination,
+      trajectoryScore: tScore,
+      weatherRisk: wRisk,
+      conflicts: cCount,
+      hasRouteData: !!rData,
+    });
     updateData({ atmEngines: { ...initialATMState, atmLoading: true } });
     try {
       const depStart = data.departureWindowStart
@@ -197,13 +229,15 @@ const FlightPlan = () => {
         }),
       ]);
 
-      const weatherIntel = weatherRes.status === "fulfilled" ? (weatherRes.value.data as WeatherIntelligenceResult) : null;
-      const airspaceSchedule = airspaceRes.status === "fulfilled" ? (airspaceRes.value.data as AirspaceScheduleResult) : null;
-      const vertiportStatus = vertiportRes.status === "fulfilled" ? (vertiportRes.value.data as VertiportStatusResult) : null;
-      const trajectoryPredict = trajectoryRes.status === "fulfilled" ? (trajectoryRes.value.data as TrajectoryPredictorResult) : null;
+      const nonBlockingErrors: string[] = [];
+
+      const weatherIntel = getSettledFunctionData<WeatherIntelligenceResult>("weather-intelligence", weatherRes, nonBlockingErrors);
+      const airspaceSchedule = getSettledFunctionData<AirspaceScheduleResult>("airspace-scheduler", airspaceRes, nonBlockingErrors);
+      const vertiportStatus = getSettledFunctionData<VertiportStatusResult>("vertiport-coordinator", vertiportRes, nonBlockingErrors);
+      const trajectoryPredict = getSettledFunctionData<TrajectoryPredictorResult>("trajectory-predictor", trajectoryRes, nonBlockingErrors);
 
       // Now run the decision engine with all data
-      const { data: decisionRes } = await supabase.functions.invoke("flight-decision-engine", {
+      const { data: decisionRes, error: decisionError } = await supabase.functions.invoke("flight-decision-engine", {
         body: {
           flight_intent_id: intentId,
           aircraft_id: data.aircraftId,
@@ -219,7 +253,21 @@ const FlightPlan = () => {
         },
       });
 
+      if (decisionError) {
+        throw new Error(`flight-decision-engine: ${decisionError.message}`);
+      }
+
       const flightDecision = decisionRes as FlightDecisionResult;
+      if (!flightDecision?.decision) {
+        throw new Error("flight-decision-engine returned no decision payload");
+      }
+
+      console.info("[ATM] decision pipeline complete", {
+        intentId,
+        decision: flightDecision.decision,
+        confidence: flightDecision.confidence,
+        routeId: flightDecision.route_id,
+      });
 
       // Auto-set selectedClearance from decision for downstream steps
       const clearanceMap = { GO: "auto-best", DELAY: "delayed-departure", REROUTE: "alternate-corridor" };
@@ -232,7 +280,7 @@ const FlightPlan = () => {
           trajectoryPredict,
           flightDecision,
           atmLoading: false,
-          atmError: null,
+          atmError: nonBlockingErrors.length > 0 ? nonBlockingErrors.join(" | ") : null,
         },
       });
     } catch (e: any) {
@@ -253,7 +301,7 @@ const FlightPlan = () => {
     if (currentStep === 1) {
       // Run trajectory analysis first, then ATM engines with results
       (async () => {
-        updateData({ analysisLoading: true, analysisComplete: false });
+        updateData({ analysisLoading: true, analysisComplete: false, routeLoading: true });
         let tScore = 80, wRisk = "low", cCount = 0, intentId: string | null = null;
         try {
           const { data: response, error } = await supabase.functions.invoke("trajectory-analysis", {
@@ -269,10 +317,18 @@ const FlightPlan = () => {
             },
           });
           if (error) throw new Error(error.message);
+          if (!response?.intent_id) throw new Error("trajectory-analysis did not return an intent ID");
           tScore = response.trajectory_score;
           wRisk = response.weather_risk;
           cCount = response.conflicts;
           intentId = response.intent_id ?? null;
+
+          console.info("[ATM] trajectory analysis complete", {
+            intentId,
+            trajectoryScore: tScore,
+            weatherRisk: wRisk,
+            conflicts: cCount,
+          });
 
           const s = toMinutes(data.departureWindowStart);
           const bestMin = s + Math.floor((toMinutes(data.departureWindowEnd) - s) / 2);
@@ -291,7 +347,7 @@ const FlightPlan = () => {
           });
         } catch (e: any) {
           toast({ title: "Analysis failed", description: e.message, variant: "destructive" });
-          updateData({ analysisLoading: false });
+          updateData({ analysisLoading: false, routeLoading: false });
           return;
         }
 
@@ -314,8 +370,19 @@ const FlightPlan = () => {
         let rData: RouteOptimizerResult | null = null;
         if (routeResult.status === "fulfilled" && !routeResult.value.error) {
           rData = routeResult.value.data as RouteOptimizerResult;
-          updateData({ routeData: rData, routeLoading: false });
+          console.info("[ATM] route optimization complete", {
+            intentId,
+            routeId: rData?.route_id,
+            overallScore: rData?.primary_route?.overall_score,
+            waypointCount: rData?.primary_route?.waypoints?.length,
+          });
+        } else if (routeResult.status === "fulfilled" && routeResult.value.error) {
+          console.error("[ATM] route-optimizer failed", routeResult.value.error.message);
+        } else if (routeResult.status === "rejected") {
+          console.error("[ATM] route-optimizer failed", routeResult.reason);
         }
+
+        updateData({ routeData: rData, routeLoading: false });
 
         await runATMEngines(intentId, tScore, wRisk, cCount, rData);
       })();
