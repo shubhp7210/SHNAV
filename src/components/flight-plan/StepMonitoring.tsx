@@ -80,6 +80,25 @@ function buildRoute(a: [number, number], b: [number, number], n = 160): [number,
   return pts;
 }
 
+function getPlannedRoute(data: FlightPlanData): [number, number][] | null {
+  const decisionRouteId = data.atmEngines.flightDecision?.route_id;
+  const matchedAlternate = decisionRouteId
+    ? data.routeData?.alternate_routes.find((route) => route.id === decisionRouteId)
+    : null;
+  const selectedRoute = matchedAlternate ?? data.routeData?.primary_route;
+
+  if (!selectedRoute?.waypoints?.length) return null;
+
+  const waypoints = selectedRoute.waypoints
+    .map((point) => {
+      if (typeof point?.lon !== "number" || typeof point?.lat !== "number") return null;
+      return [point.lon, point.lat] as [number, number];
+    })
+    .filter((point): point is [number, number] => point !== null);
+
+  return waypoints.length >= 2 ? waypoints : null;
+}
+
 function calcBearing(a: [number, number], b: [number, number]): number {
   const r = (d: number) => (d * Math.PI) / 180;
   const d = (v: number) => (v * 180) / Math.PI;
@@ -289,7 +308,7 @@ const StepMonitoring = ({ data, updateData }: Props) => {
     if (mapRef.current) return;
 
     injectStyles();
-    routePts.current = buildRoute(origin, destination);
+    routePts.current = getPlannedRoute(data) ?? buildRoute(origin, destination);
     const pts = routePts.current;
     const center: [number, number] = [
       (origin[0] + destination[0]) / 2,
@@ -488,7 +507,7 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       setFollowMode(true);
       setMuted(false);
     };
-  }, [data.monitoringActive, coordsResolved, origin, destination]);
+  }, [data.monitoringActive, data.routeData, data.atmEngines.flightDecision?.route_id, coordsResolved, origin, destination]);
 
   // ── Trajectory polling every 5 seconds ───────────────────────────────────
   useEffect(() => {

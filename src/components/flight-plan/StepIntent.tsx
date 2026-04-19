@@ -69,11 +69,13 @@ function LocationInput({
   const wrapRef = useRef<HTMLDivElement>(null);
   const { results, loading } = useLocationSearch(confirmed ? "" : inputVal);
 
+  const displayValue = useCallback((raw: string) => raw.replace(/\s*@\s*-?\d+\.?\d*\s*,\s*-?\d+\.?\d*\s*$/, ""), []);
+
   // Sync if parent resets
   useEffect(() => {
-    setInputVal(value);
+    setInputVal(displayValue(value));
     setConfirmed(!!value);
-  }, [value]);
+  }, [displayValue, value]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -81,12 +83,12 @@ function LocationInput({
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
         setOpen(false);
         // If user typed something but didn't pick — reset to last confirmed
-        if (!confirmed) { setInputVal(value); }
+        if (!confirmed) { setInputVal(displayValue(value)); }
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [confirmed, value]);
+  }, [confirmed, displayValue, value]);
 
   const select = (item: NominatimResult) => {
     // Use a clean short name: first two comma-separated parts
@@ -94,7 +96,7 @@ function LocationInput({
     setInputVal(short);
     setConfirmed(true);
     setOpen(false);
-    onChange(short);
+    onChange(`${short} @ ${item.lat},${item.lon}`);
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {

@@ -41,11 +41,49 @@ const CITY_COORDS: Record<string, [number, number]> = {
   "airport": [40.758, -73.9855], "bay": [40.6892, -74.0445],
   "east": [40.7282, -73.9442],
 };
-function getCoords(loc: string): [number, number] {
+
+function parseTaggedCoords(loc: string): [number, number] | null {
+  const tagged = loc.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
+  if (tagged) {
+    const lat = parseFloat(tagged[1]);
+    const lon = parseFloat(tagged[2]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
+  }
+
+  const bare = loc.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
+  if (bare) {
+    const lat = parseFloat(bare[1]);
+    const lon = parseFloat(bare[2]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
+  }
+
+  return null;
+}
+
+async function getCoords(loc: string): Promise<[number, number]> {
+  if (!loc?.trim()) return [40.7128, -74.006];
+
+  const parsed = parseTaggedCoords(loc);
+  if (parsed) return parsed;
+
   const lower = loc.toLowerCase();
   for (const [k, v] of Object.entries(CITY_COORDS)) {
     if (lower.includes(k)) return v;
   }
+
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(loc)}`,
+      { headers: { "User-Agent": "Altos-ATM/1.0", "Accept-Language": "en" } }
+    );
+    const arr = await res.json();
+    if (Array.isArray(arr) && arr[0]?.lat && arr[0]?.lon) {
+      return [parseFloat(arr[0].lat), parseFloat(arr[0].lon)];
+    }
+  } catch (error) {
+    console.error("Trajectory predictor geocode failed:", error);
+  }
+
   return [40.7128, -74.006];
 }
 
@@ -59,6 +97,7 @@ serve(async (req) => {
     );
 
     const { flight_intent_id } = await req.json();
+    console.info("[trajectory-predictor] received request", { flight_intent_id });
 
     // Fetch all active/pending flights
     const { data: activeFlights } = await supabase
@@ -71,9 +110,9 @@ serve(async (req) => {
     const now = Date.now();
 
     // Build position predictions for each flight
-    const predictions = flights.map((f: any) => {
-      const [oLat, oLon] = getCoords(f.origin ?? "");
-      const [dLat, dLon] = getCoords(f.destination ?? "");
+    const predictions = await Promise.all(flights.map(async (f: any) => {
+      const [oLat, oLon] = await getCoords(f.origin ?? "");
+      const [dLat, dLon] = await getCoords(f.destination ?? "");
       const depStart = new Date(f.departure_window_start).getTime();
       const totalDistKm = haversineKm(oLat, oLon, dLat, dLon);
       const totalDurationMs = (totalDistKm / EVTOL_SPEED_KMH) * 3600 * 1000;
@@ -98,7 +137,7 @@ serve(async (req) => {
         destination: f.destination,
         status: f.status,
       };
-    });
+    }));
 
     // Detect future conflicts between all pairs
     const conflicts: Array<{
@@ -154,6 +193,13 @@ serve(async (req) => {
     // For the requesting flight, compute specific prediction
     const myFlight = predictions.find(p => p.flight_intent_id === flight_intent_id);
     const myConflicts = conflicts.filter(c => c.aircraft_a === myFlight?.aircraft_id || c.aircraft_b === myFlight?.aircraft_id);
+
+    console.info("[trajectory-predictor] prediction summary", {
+      flight_intent_id,
+      total_predictions: predictions.length,
+      total_conflicts: conflicts.length,
+      matched_flight: myFlight?.aircraft_id ?? null,
+    });
 
     return new Response(JSON.stringify({
       predictions: flight_intent_id ? [myFlight ?? null] : predictions,
