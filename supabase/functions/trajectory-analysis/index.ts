@@ -205,7 +205,7 @@ Deno.serve(async (req) => {
     }
 
     // 3. Fetch real-time weather from Open-Meteo (free, no API key)
-    const coords = getCoords(intent.origin);
+    const coords = await getCoords(intent.origin);
     const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${coords.lat}&longitude=${coords.lon}&current=temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation,visibility,weather_code&hourly=visibility,wind_speed_80m,wind_gusts_10m,precipitation_probability&forecast_days=1&timezone=auto`;
 
     let weatherData: any = null;
