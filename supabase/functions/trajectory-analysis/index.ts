@@ -66,8 +66,26 @@ Deno.serve(async (req) => {
 
   try {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(supabaseUrl, supabaseKey);
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
+    const supabase = createClient(supabaseUrl, serviceKey);
+
+    // Resolve the calling user from the forwarded JWT so we can attribute
+    // the flight intent to them (required for RLS read access).
+    let userId: string | null = null;
+    const authHeader = req.headers.get("Authorization");
+    if (authHeader) {
+      const token = authHeader.replace(/^Bearer\s+/i, "");
+      try {
+        const userClient = createClient(supabaseUrl, anonKey, {
+          global: { headers: { Authorization: `Bearer ${token}` } },
+        });
+        const { data: u } = await userClient.auth.getUser(token);
+        userId = u?.user?.id ?? null;
+      } catch (_e) {
+        userId = null;
+      }
+    }
 
     const intent: FlightIntent = await req.json();
 
@@ -75,6 +93,7 @@ Deno.serve(async (req) => {
     const { data: savedIntent, error: saveError } = await supabase
       .from("flight_intents")
       .insert({
+        user_id: userId,
         aircraft_id: intent.aircraft_id,
         operator_name: intent.operator_name,
         aircraft_type: intent.aircraft_type,
@@ -83,9 +102,9 @@ Deno.serve(async (req) => {
         altitude_band: intent.altitude_band,
         departure_window_start: intent.departure_window_start,
         departure_window_end: intent.departure_window_end,
-        contingency_landing: intent.contingency_landing,
-        max_speed: intent.max_speed,
-        max_altitude: intent.max_altitude,
+        contingency_landing: intent.contingency_landing || null,
+        max_speed: intent.max_speed || null,
+        max_altitude: intent.max_altitude || null,
         status: "analyzing",
       })
       .select()
