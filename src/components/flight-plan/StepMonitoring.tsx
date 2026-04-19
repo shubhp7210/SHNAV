@@ -488,7 +488,7 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       setFollowMode(true);
       setMuted(false);
     };
-  }, [data.monitoringActive]);
+  }, [data.monitoringActive, coordsResolved, origin, destination]);
 
   // ── Trajectory polling every 5 seconds ───────────────────────────────────
   useEffect(() => {
