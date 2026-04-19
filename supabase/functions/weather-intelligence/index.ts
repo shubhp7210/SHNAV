@@ -19,12 +19,49 @@ const CITY_COORDS: Record<string, [number, number]> = {
   "tokyo": [35.6762, 139.6503], "singapore": [1.3521, 103.8198],
 };
 
-function getCoords(location: string): [number, number] {
+function parseTaggedCoords(location: string): [number, number] | null {
+  const tagged = location.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
+  if (tagged) {
+    const lat = parseFloat(tagged[1]);
+    const lon = parseFloat(tagged[2]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
+  }
+
+  const bare = location.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
+  if (bare) {
+    const lat = parseFloat(bare[1]);
+    const lon = parseFloat(bare[2]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
+  }
+
+  return null;
+}
+
+async function getCoords(location: string): Promise<[number, number]> {
+  if (!location?.trim()) return [40.7128, -74.006];
+
+  const parsed = parseTaggedCoords(location);
+  if (parsed) return parsed;
+
   const lower = location.toLowerCase().trim();
   for (const [key, coords] of Object.entries(CITY_COORDS)) {
     if (lower.includes(key)) return coords;
   }
-  return [40.7128, -74.006]; // Default NYC
+
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(location)}`,
+      { headers: { "User-Agent": "Altos-ATM/1.0", "Accept-Language": "en" } }
+    );
+    const arr = await res.json();
+    if (Array.isArray(arr) && arr[0]?.lat && arr[0]?.lon) {
+      return [parseFloat(arr[0].lat), parseFloat(arr[0].lon)];
+    }
+  } catch (error) {
+    console.error("Weather geocode failed:", error);
+  }
+
+  return [40.7128, -74.006];
 }
 
 function weatherCodeToDescription(code: number): string {
@@ -91,8 +128,8 @@ serve(async (req) => {
 
   try {
     const { origin, destination, altitude_band } = await req.json();
-    const [oLat, oLon] = getCoords(origin ?? "");
-    const [dLat, dLon] = getCoords(destination ?? "");
+    const [oLat, oLon] = await getCoords(origin ?? "");
+    const [dLat, dLon] = await getCoords(destination ?? "");
 
     // Fetch current + hourly forecast from Open-Meteo for origin AND destination
     const params = "wind_speed_10m,wind_gusts_10m,precipitation,temperature_2m,weather_code,visibility";

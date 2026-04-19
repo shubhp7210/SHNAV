@@ -69,11 +69,13 @@ function LocationInput({
   const wrapRef = useRef<HTMLDivElement>(null);
   const { results, loading } = useLocationSearch(confirmed ? "" : inputVal);
 
+  const displayValue = useCallback((raw: string) => raw.replace(/\s*@\s*-?\d+\.?\d*\s*,\s*-?\d+\.?\d*\s*$/, ""), []);
+
   // Sync if parent resets
   useEffect(() => {
-    setInputVal(value);
+    setInputVal(displayValue(value));
     setConfirmed(!!value);
-  }, [value]);
+  }, [displayValue, value]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -94,7 +96,7 @@ function LocationInput({
     setInputVal(short);
     setConfirmed(true);
     setOpen(false);
-    onChange(short);
+    onChange(`${short} @ ${item.lat},${item.lon}`);
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {

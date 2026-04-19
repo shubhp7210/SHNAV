@@ -397,6 +397,7 @@ Deno.serve(async (req) => {
       .from("flight_intents")
       .select("*")
       .in("status", ["analyzing", "pending", "approved", "active"])
+      .neq("id", flight_intent_id ?? "00000000-0000-0000-0000-000000000000")
       .order("created_at", { ascending: false })
       .limit(100);
 
