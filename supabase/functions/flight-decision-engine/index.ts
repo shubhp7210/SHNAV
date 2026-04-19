@@ -56,6 +56,18 @@ serve(async (req) => {
       departure_window_start,
     } = await req.json();
 
+    console.info("[flight-decision-engine] received request", {
+      flight_intent_id,
+      aircraft_id,
+      trajectory_score,
+      weather_risk,
+      conflicts,
+      has_route_data: !!route_data,
+      has_weather_intel: !!weather_intel,
+      has_airspace_schedule: !!airspace_schedule,
+      has_vertiport_status: !!vertiport_status,
+    });
+
     // Extract key signals
     const weatherRiskScore: number = weather_intel?.origin_weather?.risk_score ?? (weather_risk === "high" ? 70 : weather_risk === "moderate" ? 40 : 10);
     const forecast15Risk: number = weather_intel?.forecast?.t_plus_15?.risk_score ?? weatherRiskScore;
@@ -211,6 +223,15 @@ serve(async (req) => {
       savedDecisionId = decisionRow?.id ?? null;
     }
 
+    console.info("[flight-decision-engine] decision computed", {
+      flight_intent_id,
+      decision,
+      confidence,
+      delay_minutes: delayMinutes,
+      route_id: useRouteId,
+      saved_decision_id: savedDecisionId,
+    });
+
     return new Response(JSON.stringify({
       decision_id: savedDecisionId,
       decision,
@@ -232,6 +253,7 @@ serve(async (req) => {
       },
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
+    console.error("[flight-decision-engine] failed", err);
     return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: corsHeaders });
   }
 });

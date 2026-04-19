@@ -97,6 +97,7 @@ serve(async (req) => {
     );
 
     const { flight_intent_id } = await req.json();
+    console.info("[trajectory-predictor] received request", { flight_intent_id });
 
     // Fetch all active/pending flights
     const { data: activeFlights } = await supabase
@@ -192,6 +193,13 @@ serve(async (req) => {
     // For the requesting flight, compute specific prediction
     const myFlight = predictions.find(p => p.flight_intent_id === flight_intent_id);
     const myConflicts = conflicts.filter(c => c.aircraft_a === myFlight?.aircraft_id || c.aircraft_b === myFlight?.aircraft_id);
+
+    console.info("[trajectory-predictor] prediction summary", {
+      flight_intent_id,
+      total_predictions: predictions.length,
+      total_conflicts: conflicts.length,
+      matched_flight: myFlight?.aircraft_id ?? null,
+    });
 
     return new Response(JSON.stringify({
       predictions: flight_intent_id ? [myFlight ?? null] : predictions,

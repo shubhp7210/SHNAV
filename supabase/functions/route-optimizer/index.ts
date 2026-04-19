@@ -323,8 +323,21 @@ Deno.serve(async (req) => {
       flight_intent_id,
     } = body;
 
+    console.info("[route-optimizer] received request", {
+      flight_intent_id,
+      aircraft_id,
+      origin,
+      destination,
+      altitude_band,
+    });
+
     const originCoords = await getCoords(origin);
     const destCoords = await getCoords(destination);
+    console.info("[route-optimizer] resolved coordinates", {
+      flight_intent_id,
+      origin_coords: originCoords,
+      destination_coords: destCoords,
+    });
     const midLat = (originCoords[0] + destCoords[0]) / 2;
     const midLon = (originCoords[1] + destCoords[1]) / 2;
 
