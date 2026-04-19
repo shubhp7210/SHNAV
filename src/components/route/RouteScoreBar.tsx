@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { forwardRef, useEffect, useState } from "react";
 
 interface Props {
   label: string;
@@ -6,7 +6,7 @@ interface Props {
   color?: string;
 }
 
-const RouteScoreBar = ({ label, score, color }: Props) => {
+const RouteScoreBar = forwardRef<HTMLDivElement, Props>(({ label, score, color }, ref) => {
   const [animated, setAnimated] = useState(false);
 
   useEffect(() => {
@@ -28,7 +28,7 @@ const RouteScoreBar = ({ label, score, color }: Props) => {
       : "text-red-400";
 
   return (
-    <div className="flex items-center gap-3 w-full">
+    <div ref={ref} className="flex items-center gap-3 w-full">
       <span className="text-xs text-muted-foreground font-mono w-20 shrink-0">{label}</span>
       <div className="flex-1 h-2 rounded-full bg-secondary overflow-hidden">
         <div
@@ -41,6 +41,8 @@ const RouteScoreBar = ({ label, score, color }: Props) => {
       </span>
     </div>
   );
-};
+});
+
+RouteScoreBar.displayName = "RouteScoreBar";
 
 export default RouteScoreBar;
