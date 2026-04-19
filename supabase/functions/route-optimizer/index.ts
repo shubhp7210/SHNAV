@@ -29,9 +29,49 @@ const LOCATION_COORDS: Record<string, [number, number]> = {
   "default": [40.7128, -74.006],
 };
 
-function getCoords(location: string): [number, number] {
+function parseTaggedCoords(location: string): [number, number] | null {
+  const tagged = location.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
+  if (tagged) {
+    const lat = parseFloat(tagged[1]);
+    const lon = parseFloat(tagged[2]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
+  }
+
+  const bare = location.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
+  if (bare) {
+    const lat = parseFloat(bare[1]);
+    const lon = parseFloat(bare[2]);
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
+  }
+
+  return null;
+}
+
+async function getCoords(location: string): Promise<[number, number]> {
+  if (!location?.trim()) return LOCATION_COORDS["default"];
+
+  const parsed = parseTaggedCoords(location);
+  if (parsed) return parsed;
+
   const key = location.toLowerCase().trim();
-  return LOCATION_COORDS[key] ?? LOCATION_COORDS["default"];
+  for (const [known, coords] of Object.entries(LOCATION_COORDS)) {
+    if (known !== "default" && key.includes(known)) return coords;
+  }
+
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(location)}`,
+      { headers: { "User-Agent": "Altos-ATM/1.0", "Accept-Language": "en" } }
+    );
+    const arr = await res.json();
+    if (Array.isArray(arr) && arr[0]?.lat && arr[0]?.lon) {
+      return [parseFloat(arr[0].lat), parseFloat(arr[0].lon)];
+    }
+  } catch (error) {
+    console.error("Route optimizer geocode failed:", error);
+  }
+
+  return LOCATION_COORDS["default"];
 }
 
 // ──────────────────────────────────────────────
@@ -283,8 +323,8 @@ Deno.serve(async (req) => {
       flight_intent_id,
     } = body;
 
-    const originCoords = getCoords(origin);
-    const destCoords = getCoords(destination);
+    const originCoords = await getCoords(origin);
+    const destCoords = await getCoords(destination);
     const midLat = (originCoords[0] + destCoords[0]) / 2;
     const midLon = (originCoords[1] + destCoords[1]) / 2;
 
@@ -372,8 +412,8 @@ Deno.serve(async (req) => {
       if (!windowsOverlap(departure_window_start, departure_window_end, intent.departure_window_start, intent.departure_window_end)) continue;
 
       const sameAlt = intent.altitude_band === altitude_band;
-      const iOrigin = getCoords(intent.origin);
-      const iDest = getCoords(intent.destination);
+      const iOrigin = await getCoords(intent.origin);
+      const iDest = await getCoords(intent.destination);
       const nearOrigin = haversine(originCoords[0], originCoords[1], iOrigin[0], iOrigin[1]) < 20;
       const nearDest = haversine(destCoords[0], destCoords[1], iDest[0], iDest[1]) < 20;
       const routeSimilar = nearOrigin || nearDest;
