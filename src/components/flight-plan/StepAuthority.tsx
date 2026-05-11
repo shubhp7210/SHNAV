@@ -31,7 +31,6 @@ const StepAuthority = ({ data, updateData }: Props) => {
             ["Aircraft", data.aircraftId || "—"],
             ["Operator", data.operatorName || "—"],
             ["Route", `${data.origin || "—"} → ${data.destination || "—"}`],
-            ["Altitude Band", data.altitudeBand.toUpperCase()],
             ["Departure Window", `${data.departureWindowStart || "—"} – ${data.departureWindowEnd || "—"}`],
             ["Clearance", clearanceLabel],
           ].map(([label, value]) => (
