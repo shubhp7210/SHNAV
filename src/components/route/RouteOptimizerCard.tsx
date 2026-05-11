@@ -18,6 +18,8 @@ import RouteScoreBar from "./RouteScoreBar";
 interface Props {
   routeData: RouteOptimizerResult | null;
   routeLoading: boolean;
+  selectedRouteId?: string | null;
+  onSelectRoute?: (routeId: string) => void | Promise<void>;
 }
 
 function scoreRingColor(score: number): string {
@@ -34,58 +36,49 @@ function severityBadge(severity: ConflictDetail["severity"]): string {
 
 interface AlternateCardProps {
   route: RouteCandidate;
+  selected: boolean;
+  onSelect?: () => void;
 }
 
-const AlternateCard = ({ route }: AlternateCardProps) => {
-  const [expanded, setExpanded] = useState(false);
-
+const AlternateCard = ({ route, selected, onSelect }: AlternateCardProps) => {
   return (
-    <div className="border border-border/50 rounded-lg p-4 bg-card/40">
-      <button
-        className="w-full flex items-center justify-between"
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <div className="flex items-center gap-3">
-          <span className="text-sm font-semibold text-foreground">{route.label}</span>
+    <div
+      className={`border rounded-lg p-3 transition-colors ${
+        selected ? "border-primary/60 bg-primary/5" : "border-border/50 bg-card/40 hover:border-border"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
           <span
-            className={`text-xs font-mono px-2 py-0.5 rounded-full border ${scoreRingColor(route.overall_score)}`}
+            className={`text-xs font-mono px-2 py-0.5 rounded-full border shrink-0 ${scoreRingColor(route.overall_score)}`}
           >
             {route.overall_score}
           </span>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-foreground truncate">{route.label}</p>
+            <p className="text-xs text-muted-foreground font-mono">
+              {route.distance_km} km · {route.estimated_time_min} min
+            </p>
+          </div>
         </div>
-        <div className="flex items-center gap-3 text-xs text-muted-foreground font-mono">
-          <span>{route.distance_km} km</span>
-          <span>{route.estimated_time_min} min</span>
-          {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-        </div>
-      </button>
-
-      <AnimatePresence>
-        {expanded && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.25 }}
-            className="overflow-hidden"
+        {selected ? (
+          <span className="text-xs font-mono text-primary px-2 py-1 rounded-md border border-primary/40 bg-primary/10 shrink-0">
+            Selected
+          </span>
+        ) : (
+          <button
+            onClick={onSelect}
+            className="text-xs font-mono text-primary px-2.5 py-1 rounded-md border border-primary/40 hover:bg-primary/10 transition-colors shrink-0"
           >
-            <div className="mt-4 space-y-2">
-              <RouteScoreBar label="Safety" score={route.safety_score} />
-              <RouteScoreBar label="Weather" score={route.weather_score} />
-              <RouteScoreBar label="Traffic" score={route.traffic_score} />
-              <RouteScoreBar label="Efficiency" score={route.efficiency_score} />
-              {route.selection_reason && (
-                <p className="text-xs text-muted-foreground italic mt-2">{route.selection_reason}</p>
-              )}
-            </div>
-          </motion.div>
+            Use route
+          </button>
         )}
-      </AnimatePresence>
+      </div>
     </div>
   );
 };
 
-const RouteOptimizerCard = ({ routeData, routeLoading }: Props) => {
+const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelectRoute }: Props) => {
   const [showAlternates, setShowAlternates] = useState(false);
 
   if (routeLoading) {

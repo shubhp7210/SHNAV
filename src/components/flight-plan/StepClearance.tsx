@@ -61,7 +61,12 @@ const StepClearance = ({ data, onSelectRoute }: Props) => {
       )}
 
       {/* Route intelligence */}
-      <RouteOptimizerCard routeData={data.routeData} routeLoading={data.routeLoading} />
+      <RouteOptimizerCard
+        routeData={data.routeData}
+        routeLoading={data.routeLoading}
+        selectedRouteId={data.selectedRouteId}
+        onSelectRoute={onSelectRoute}
+      />
     </div>
   );
 };
