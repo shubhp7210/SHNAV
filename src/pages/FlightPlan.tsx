@@ -13,6 +13,7 @@ import {
   Plane,
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import type { Json } from "@/integrations/supabase/types";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import type { RouteOptimizerResult } from "@/lib/routeTypes";
@@ -461,18 +462,18 @@ const FlightPlan = () => {
           avg_weather_score: avg(Number(existing.avg_weather_score) || 0, route.weather_score),
           avg_traffic_score: avg(Number(existing.avg_traffic_score) || 0, route.traffic_score),
           avg_efficiency_score: avg(Number(existing.avg_efficiency_score) || 0, route.efficiency_score),
-          preferred_waypoints: route.waypoints,
+          preferred_waypoints: route.waypoints as unknown as Json,
           last_updated: new Date().toISOString(),
         }).eq("id", existing.id);
       } else {
-        await supabase.from("route_patterns").insert({
+        await supabase.from("route_patterns").insert([{
           origin_key: originKey, destination_key: destKey, altitude_band: data.altitudeBand,
           flight_count: 1,
           avg_overall_score: route.overall_score, avg_safety_score: route.safety_score,
           avg_weather_score: route.weather_score, avg_traffic_score: route.traffic_score,
           avg_efficiency_score: route.efficiency_score,
-          preferred_waypoints: route.waypoints,
-        });
+          preferred_waypoints: route.waypoints as unknown as Json,
+        }]);
       }
       console.info("[learning] route_patterns updated for", originKey, "→", destKey);
     } catch (err) {
