@@ -513,7 +513,7 @@ export default function Dashboard() {
                                 <span className={`text-xs font-mono hidden sm:block ${cfg.color}`}>{cfg.label}</span>
                               </div>
 
-                              <span className="text-[11px] font-mono text-muted-foreground/60 hidden sm:block uppercase tracking-wide">{f.altitude_band}</span>
+                              <span className="text-[11px] font-mono text-muted-foreground/60 hidden sm:block uppercase tracking-wide">{f.weather_risk}</span>
 
                               <span className="text-[11px] font-mono text-muted-foreground shrink-0">
                                 {new Date(f.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
