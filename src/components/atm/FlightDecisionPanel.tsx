@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { motion } from "framer-motion";
-import { CheckCircle, Clock, RefreshCw, Zap, Shield, AlertTriangle } from "lucide-react";
+import { CheckCircle, Clock, RefreshCw, Shield, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
 import type { FlightDecisionResult } from "@/lib/atmTypes";
 
 interface Props {
@@ -41,6 +42,7 @@ const DECISION_CONFIG = {
 };
 
 export default function FlightDecisionPanel({ decision, loading }: Props) {
+  const [showDetails, setShowDetails] = useState(false);
   if (loading) {
     return (
       <div className="rounded-xl border border-white/10 bg-white/5 p-6 animate-pulse">
@@ -108,58 +110,41 @@ export default function FlightDecisionPanel({ decision, loading }: Props) {
         {/* Reason */}
         <p className="text-sm text-white/80 leading-relaxed">{decision.reason}</p>
 
-        {/* Key info grid */}
+        {/* Essential info — clean two-up */}
         <div className="grid grid-cols-2 gap-3">
           <div className="bg-black/20 rounded-lg p-3">
-            <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Departure Time</p>
+            <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Departure</p>
             <p className="text-base font-bold text-white">{depStr}</p>
             {decision.delay_minutes > 0 && (
-              <p className="text-xs text-amber-400">+{decision.delay_minutes} min delay</p>
+              <p className="text-xs text-amber-400">+{decision.delay_minutes} min hold</p>
             )}
           </div>
           <div className="bg-black/20 rounded-lg p-3">
-            <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Trajectory Score</p>
-            <p className="text-base font-bold text-white">{decision.inputs_summary.trajectory_score}/100</p>
-            <p className="text-xs text-white/40">Weather: {decision.inputs_summary.weather_risk}</p>
-          </div>
-          <div className="bg-black/20 rounded-lg p-3">
-            <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Conflicts</p>
-            <p className="text-base font-bold text-white">{decision.inputs_summary.conflicts}</p>
-            <p className="text-xs text-white/40">Detected aircraft</p>
-          </div>
-          <div className="bg-black/20 rounded-lg p-3">
-            <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Airspace Load</p>
-            <p className="text-base font-bold text-white">{decision.inputs_summary.airspace_load}%</p>
-            <p className={`text-xs ${decision.inputs_summary.airspace_load >= 80 ? "text-red-400" : "text-white/40"}`}>
-              {decision.inputs_summary.airspace_load >= 80 ? "Congested" : "Normal"}
+            <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Status</p>
+            <p className="text-base font-bold text-white flex items-center gap-1.5">
+              {decision.simulation.safe ? <Shield className="w-4 h-4 text-emerald-400" /> : <AlertTriangle className="w-4 h-4 text-amber-400" />}
+              {decision.simulation.safe ? "Safe corridor" : "Caution"}
             </p>
+            <p className="text-xs text-white/40">Weather {decision.inputs_summary.weather_risk}</p>
           </div>
         </div>
 
-        {/* Simulation results */}
-        <div>
-          <p className="text-[10px] text-white/40 uppercase tracking-widest mb-2">15-Min Simulation</p>
-          <div className="flex flex-wrap gap-2">
-            {[
-              { ok: decision.simulation.safe, label: "Safe" },
-              { ok: decision.simulation.energy_adequate, label: "Energy OK" },
-              { ok: decision.simulation.airspace_clear, label: "Airspace Clear" },
-              { ok: decision.simulation.predicted_conflicts === 0, label: "No Conflicts" },
-            ].map(({ ok, label }) => (
-              <span
-                key={label}
-                className={`text-xs px-2.5 py-1 rounded-full border flex items-center gap-1 ${
-                  ok
-                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                    : "border-red-500/40 bg-red-500/10 text-red-300"
-                }`}
-              >
-                {ok ? <Shield className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
-                {label}
-              </span>
-            ))}
+        {/* Technical details — hidden by default */}
+        <button
+          onClick={() => setShowDetails((v) => !v)}
+          className="flex items-center gap-1 text-[11px] font-mono text-white/40 hover:text-white/70 transition-colors"
+        >
+          {showDetails ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          {showDetails ? "Hide" : "Show"} technical details
+        </button>
+        {showDetails && (
+          <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-white/60 border-t border-white/10 pt-3">
+            <div>Trajectory: <span className="text-white">{decision.inputs_summary.trajectory_score}/100</span></div>
+            <div>Conflicts: <span className="text-white">{decision.inputs_summary.conflicts}</span></div>
+            <div>Airspace load: <span className="text-white">{decision.inputs_summary.airspace_load}%</span></div>
+            <div>Route score: <span className="text-white">{decision.inputs_summary.route_score}/100</span></div>
           </div>
-        </div>
+        )}
       </div>
     </motion.div>
   );

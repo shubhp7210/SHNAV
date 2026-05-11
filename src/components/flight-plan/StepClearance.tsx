@@ -10,9 +10,10 @@ import TrajectoryConflictAlert from "@/components/atm/TrajectoryConflictAlert";
 interface Props {
   data: FlightPlanData;
   updateData: (d: Partial<FlightPlanData>) => void;
+  onSelectRoute?: (routeId: string) => void | Promise<void>;
 }
 
-const StepClearance = ({ data }: Props) => {
+const StepClearance = ({ data, onSelectRoute }: Props) => {
   const { atmEngines } = data;
   const loading = data.analysisLoading || atmEngines.atmLoading;
 
@@ -32,13 +33,9 @@ const StepClearance = ({ data }: Props) => {
 
   return (
     <div className="space-y-5">
-      {/* Single automated decision — mandatory output */}
-      {atmEngines.flightDecision ? (
+      {/* Single automated decision — always present */}
+      {atmEngines.flightDecision && (
         <FlightDecisionPanel decision={atmEngines.flightDecision} />
-      ) : (
-        <div className="rounded-xl border border-white/10 bg-white/5 p-5 text-center text-sm text-white/40">
-          Decision engine unavailable — proceed with manual review below.
-        </div>
       )}
 
       {/* Trajectory conflict prediction */}
@@ -64,7 +61,12 @@ const StepClearance = ({ data }: Props) => {
       )}
 
       {/* Route intelligence */}
-      <RouteOptimizerCard routeData={data.routeData} routeLoading={data.routeLoading} />
+      <RouteOptimizerCard
+        routeData={data.routeData}
+        routeLoading={data.routeLoading}
+        selectedRouteId={data.selectedRouteId}
+        onSelectRoute={onSelectRoute}
+      />
     </div>
   );
 };

@@ -3,9 +3,10 @@ import type { FlightPlanData } from "@/pages/FlightPlan";
 interface Props {
   data: FlightPlanData;
   updateData: (d: Partial<FlightPlanData>) => void;
+  onApprove?: () => void | Promise<void>;
 }
 
-const StepAuthority = ({ data, updateData }: Props) => {
+const StepAuthority = ({ data, updateData, onApprove }: Props) => {
   const decisionLabel: Record<string, string> = {
     "auto-best": "GO — Cleared for Departure",
     "delayed-departure": "DELAY — Departure Held",
@@ -31,7 +32,6 @@ const StepAuthority = ({ data, updateData }: Props) => {
             ["Aircraft", data.aircraftId || "—"],
             ["Operator", data.operatorName || "—"],
             ["Route", `${data.origin || "—"} → ${data.destination || "—"}`],
-            ["Altitude Band", data.altitudeBand.toUpperCase()],
             ["Departure Window", `${data.departureWindowStart || "—"} – ${data.departureWindowEnd || "—"}`],
             ["Clearance", clearanceLabel],
           ].map(([label, value]) => (
@@ -47,7 +47,10 @@ const StepAuthority = ({ data, updateData }: Props) => {
         <input
           type="checkbox"
           checked={data.authorityApproved}
-          onChange={(e) => updateData({ authorityApproved: e.target.checked })}
+          onChange={(e) => {
+            updateData({ authorityApproved: e.target.checked });
+            if (e.target.checked) onApprove?.();
+          }}
           className="mt-1 accent-[hsl(175,70%,45%)]"
         />
         <div>

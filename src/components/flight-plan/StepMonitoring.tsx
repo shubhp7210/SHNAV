@@ -529,7 +529,7 @@ const StepMonitoring = ({ data, updateData }: Props) => {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [data.monitoringActive, data.flightIntentId]);
 
-  // ── Animation (starts only once mapReady is true) ─────────────────────────
+  // ── Tracking: real GPS first, simulation fallback ─────────────────────────
   useEffect(() => {
     if (!mapReady) return;
     const map    = mapRef.current;
@@ -537,86 +537,145 @@ const StepMonitoring = ({ data, updateData }: Props) => {
     if (!map || !marker) return;
 
     const pts      = routePts.current;
-    const DURATION = 48_000; // 48 s full flight
-    startTsRef.current = null;
+    const totalDist = pts.reduce((acc, p, i) => i === 0 ? 0 : acc + Math.hypot(p[0] - pts[i-1][0], p[1] - pts[i-1][1]), 0);
 
-    // Start ambient audio + haptic pulse on launch
     audioRef.current?.startAmbient();
     haptic([40, 20, 80, 20, 120]);
 
-    const animate = (ts: number) => {
-      if (!startTsRef.current) startTsRef.current = ts;
-      const t   = Math.min((ts - startTsRef.current) / DURATION, 1);
-      const idx = Math.min(Math.floor(t * (pts.length - 1)), pts.length - 2);
-      const pos = pts[idx];
-      const pct = Math.round(t * 100);
+    // Try real geolocation first
+    let watchId: number | null = null;
+    let usingGps = false;
 
-      setProgress(t);
-      const newStatus: "nominal" | "alert" = t >= 0.28 && t < 0.42 ? "alert" : "nominal";
-      setStatus(newStatus);
-
-      // ── Status change events ─────────────────────────────────────────
-      if (newStatus !== lastStatusRef.current) {
-        lastStatusRef.current = newStatus;
-        if (newStatus === "alert") {
-          audioRef.current?.playAlert();
-          haptic([150, 80, 150, 80, 200]); // warning pattern
-        } else {
-          audioRef.current?.playAlertClear();
-          haptic([60]);
-        }
-      }
-
-      // ── Waypoint pings at 25 / 50 / 75 / 100 % ──────────────────────
-      for (const mark of [25, 50, 75]) {
-        if (pct >= mark && !waypointsHit.current.has(mark)) {
-          waypointsHit.current.add(mark);
-          audioRef.current?.playWaypoint();
-          haptic([30]);
-        }
-      }
-
-      // ── Arrival ──────────────────────────────────────────────────────
-      if (t >= 1 && !waypointsHit.current.has(100)) {
-        waypointsHit.current.add(100);
-        audioRef.current?.playArrival();
-        audioRef.current?.stopAmbient(3);
-        haptic([80, 40, 80, 40, 300]); // celebration
-      }
-
-      // Move + rotate aircraft
-      marker.setLngLat(pos);
-      const nextIdx = Math.min(idx + 6, pts.length - 1);
-      const head    = calcBearing(pos, pts[nextIdx]);
-      marker.setRotation(head);
-
-      // Grow traveled trail
-      const src = map.getSource("route-traveled") as maplibregl.GeoJSONSource | undefined;
-      src?.setData({
-        type: "Feature",
-        properties: {},
-        geometry: { type: "LineString", coordinates: pts.slice(0, idx + 1) },
-      });
-
-      // Smooth camera follow — throttled to every 600 ms to avoid fighting the user
-      if (followRef.current && ts - lastCamTs.current > 600) {
-        lastCamTs.current = ts;
-        map.easeTo({
-          center:   pos,
-          bearing:  head,
-          pitch:    60,
-          zoom:     15,
-          duration: 900,
-          easing:   (x) => 1 - Math.pow(1 - x, 3), // ease-out cubic
+    const persistUpdate = async (lat: number, lon: number, heading: number, speedKmh: number, deviationM: number) => {
+      if (!data.flightIntentId) return;
+      try {
+        await supabase.from("trajectory_updates").insert({
+          flight_intent_id: data.flightIntentId,
+          aircraft_id: data.aircraftId,
+          lat, lon,
+          heading_deg: heading,
+          speed_kmh: speedKmh,
+          altitude_ft: 500,
+          is_on_route: deviationM < 250,
+          deviation_meters: deviationM,
         });
-      }
-
-      if (t < 1) animRef.current = requestAnimationFrame(animate);
+      } catch { /* non-fatal */ }
     };
 
-    animRef.current = requestAnimationFrame(animate);
-    return () => { if (animRef.current) cancelAnimationFrame(animRef.current); };
-  }, [mapReady]);
+    const distMeters = (a: [number, number], b: [number, number]) => {
+      const R = 6_371_000;
+      const dLat = ((b[1] - a[1]) * Math.PI) / 180;
+      const dLon = ((b[0] - a[0]) * Math.PI) / 180;
+      const lat1 = (a[1] * Math.PI) / 180;
+      const lat2 = (b[1] * Math.PI) / 180;
+      const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+      return 2 * R * Math.asin(Math.sqrt(h));
+    };
+
+    const nearestRouteDeviation = (pos: [number, number]): { idx: number; meters: number } => {
+      let best = { idx: 0, meters: Infinity };
+      for (let i = 0; i < pts.length; i++) {
+        const m = distMeters(pos, pts[i]);
+        if (m < best.meters) best = { idx: i, meters: m };
+      }
+      return best;
+    };
+
+    const onGps = (geo: GeolocationPosition) => {
+      const pos: [number, number] = [geo.coords.longitude, geo.coords.latitude];
+      const { idx, meters } = nearestRouteDeviation(pos);
+      const t = idx / Math.max(1, pts.length - 1);
+      setProgress(t);
+      const newStatus: "nominal" | "alert" = meters > 250 ? "alert" : "nominal";
+      setStatus(newStatus);
+      if (newStatus !== lastStatusRef.current) {
+        lastStatusRef.current = newStatus;
+        if (newStatus === "alert") { audioRef.current?.playAlert(); haptic([150, 80, 150, 80, 200]); }
+        else { audioRef.current?.playAlertClear(); haptic([60]); }
+      }
+      const nextIdx = Math.min(idx + 3, pts.length - 1);
+      const head = geo.coords.heading ?? calcBearing(pos, pts[nextIdx]);
+      marker.setLngLat(pos);
+      marker.setRotation(head);
+      const src = map.getSource("route-traveled") as maplibregl.GeoJSONSource | undefined;
+      src?.setData({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [...pts.slice(0, idx + 1), pos] } });
+      if (followRef.current && performance.now() - lastCamTs.current > 600) {
+        lastCamTs.current = performance.now();
+        map.easeTo({ center: pos, bearing: head, pitch: 60, zoom: 15, duration: 900, easing: (x) => 1 - Math.pow(1 - x, 3) });
+      }
+      const speedKmh = (geo.coords.speed ?? 0) * 3.6;
+      void persistUpdate(geo.coords.latitude, geo.coords.longitude, head, speedKmh, meters);
+    };
+
+    const startSimulation = () => {
+      const DURATION = 48_000;
+      startTsRef.current = null;
+      const animate = (ts: number) => {
+        if (!startTsRef.current) startTsRef.current = ts;
+        const t   = Math.min((ts - startTsRef.current) / DURATION, 1);
+        const idx = Math.min(Math.floor(t * (pts.length - 1)), pts.length - 2);
+        const pos = pts[idx];
+        const pct = Math.round(t * 100);
+        setProgress(t);
+        const newStatus: "nominal" | "alert" = t >= 0.28 && t < 0.42 ? "alert" : "nominal";
+        setStatus(newStatus);
+        if (newStatus !== lastStatusRef.current) {
+          lastStatusRef.current = newStatus;
+          if (newStatus === "alert") { audioRef.current?.playAlert(); haptic([150, 80, 150, 80, 200]); }
+          else { audioRef.current?.playAlertClear(); haptic([60]); }
+        }
+        for (const mark of [25, 50, 75]) {
+          if (pct >= mark && !waypointsHit.current.has(mark)) {
+            waypointsHit.current.add(mark);
+            audioRef.current?.playWaypoint();
+            haptic([30]);
+          }
+        }
+        if (t >= 1 && !waypointsHit.current.has(100)) {
+          waypointsHit.current.add(100);
+          audioRef.current?.playArrival();
+          audioRef.current?.stopAmbient(3);
+          haptic([80, 40, 80, 40, 300]);
+        }
+        marker.setLngLat(pos);
+        const nextIdx = Math.min(idx + 6, pts.length - 1);
+        const head    = calcBearing(pos, pts[nextIdx]);
+        marker.setRotation(head);
+        const src = map.getSource("route-traveled") as maplibregl.GeoJSONSource | undefined;
+        src?.setData({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: pts.slice(0, idx + 1) } });
+        if (followRef.current && ts - lastCamTs.current > 600) {
+          lastCamTs.current = ts;
+          map.easeTo({ center: pos, bearing: head, pitch: 60, zoom: 15, duration: 900, easing: (x) => 1 - Math.pow(1 - x, 3) });
+        }
+        if (t < 1) animRef.current = requestAnimationFrame(animate);
+      };
+      animRef.current = requestAnimationFrame(animate);
+    };
+
+    if (typeof navigator !== "undefined" && navigator.geolocation) {
+      // Probe once — if we get a position, switch to live tracking
+      navigator.geolocation.getCurrentPosition(
+        (geo) => {
+          usingGps = true;
+          onGps(geo);
+          watchId = navigator.geolocation.watchPosition(onGps, () => {
+            // permission revoked / error → fall back to simulation
+            if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+            if (!animRef.current) startSimulation();
+          }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 10_000 });
+        },
+        () => { startSimulation(); }, // permission denied → simulation
+        { enableHighAccuracy: true, timeout: 8_000 }
+      );
+    } else {
+      startSimulation();
+    }
+
+    return () => {
+      if (animRef.current) cancelAnimationFrame(animRef.current);
+      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+    };
+  }, [mapReady, data.aircraftId, data.flightIntentId]);
 
   // ── Idle screen ───────────────────────────────────────────────────────────
   if (!data.monitoringActive) {
@@ -769,10 +828,9 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       </div>
 
       {/* ── Info strip ───────────────────────────────────────────────── */}
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid grid-cols-3 gap-2">
         {[
           { label: "FROM",     value: data.origin      || "—", color: "text-primary" },
-          { label: "ALT BAND", value: data.altitudeBand.toUpperCase() },
           { label: "PROGRESS", value: `${pct}%` },
           { label: "TO",       value: data.destination || "—" },
         ].map(({ label, value, color }) => (

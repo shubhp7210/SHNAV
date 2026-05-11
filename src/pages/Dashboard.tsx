@@ -25,7 +25,6 @@ interface FlightRecord {
   weather_risk: string;
   conflicts: number;
   created_at: string;
-  altitude_band: string;
 }
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; dot: string }> = {
@@ -175,7 +174,7 @@ export default function Dashboard() {
     if (!user && !BYPASS_AUTH) return;
     supabase
       .from("flight_intents")
-      .select("id,aircraft_id,origin,destination,trajectory_score,status,weather_risk,conflicts,created_at,altitude_band")
+      .select("id,aircraft_id,origin,destination,trajectory_score,status,weather_risk,conflicts,created_at")
       .order("created_at", { ascending: false })
       .limit(12)
       .then(({ data, error }) => {
@@ -284,6 +283,13 @@ export default function Dashboard() {
             <h1 className="text-sm font-semibold leading-tight">Welcome back, <span className="text-primary">{displayName}</span></h1>
           </div>
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => navigate("/")}
+              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-border/40 text-xs font-mono text-muted-foreground hover:text-foreground hover:border-border transition-colors"
+            >
+              <Home className="w-3.5 h-3.5" />
+              Home
+            </button>
             <div className="hidden sm:flex items-center gap-2 bg-secondary/40 rounded-xl px-3 py-1.5 border border-border/30">
               <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
               <span className="text-xs font-mono text-muted-foreground">{clock} UTC</span>
@@ -507,7 +513,7 @@ export default function Dashboard() {
                                 <span className={`text-xs font-mono hidden sm:block ${cfg.color}`}>{cfg.label}</span>
                               </div>
 
-                              <span className="text-[11px] font-mono text-muted-foreground/60 hidden sm:block uppercase tracking-wide">{f.altitude_band}</span>
+                              <span className="text-[11px] font-mono text-muted-foreground/60 hidden sm:block uppercase tracking-wide">{f.weather_risk}</span>
 
                               <span className="text-[11px] font-mono text-muted-foreground shrink-0">
                                 {new Date(f.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}

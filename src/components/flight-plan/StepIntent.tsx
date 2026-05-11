@@ -193,19 +193,6 @@ const StepIntent = ({ data, updateData }: Props) => {
           placeholder="Search for a city or address..."
         />
 
-        <div className="space-y-2 md:col-span-2">
-          <label className="text-sm font-medium text-foreground">Requested Altitude Band</label>
-          <select
-            value={data.altitudeBand}
-            onChange={(e) => updateData({ altitudeBand: e.target.value })}
-            className="w-full px-4 py-2.5 rounded-md bg-secondary border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm"
-          >
-            <option value="low">Low (0–500 ft AGL)</option>
-            <option value="mid">Mid (500–1000 ft AGL)</option>
-            <option value="high">High (1000–1500 ft AGL)</option>
-          </select>
-        </div>
-
         <div className="space-y-2">
           <label className="text-sm font-medium text-foreground">Departure Window Start</label>
           <input
