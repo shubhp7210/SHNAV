@@ -769,10 +769,9 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       </div>
 
       {/* ── Info strip ───────────────────────────────────────────────── */}
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid grid-cols-3 gap-2">
         {[
           { label: "FROM",     value: data.origin      || "—", color: "text-primary" },
-          { label: "ALT BAND", value: data.altitudeBand.toUpperCase() },
           { label: "PROGRESS", value: `${pct}%` },
           { label: "TO",       value: data.destination || "—" },
         ].map(({ label, value, color }) => (
