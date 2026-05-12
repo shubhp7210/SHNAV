@@ -714,11 +714,16 @@ const StepMonitoring = ({ data, updateData }: Props) => {
         const nextIdx = Math.min(idx + 6, pts.length - 1);
         const head    = calcBearing(pos, pts[nextIdx]);
         marker.setRotation(head);
+        setHeading(head);
+        setSpeedKmh(90);
+        setDriftClock(newStatus === "alert" ? computeDriftClock(pos, pts[idx], head) : null);
+        evaluateAutoPov(head, ts);
         const src = map.getSource("route-traveled") as maplibregl.GeoJSONSource | undefined;
         src?.setData({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: pts.slice(0, idx + 1) } });
         if (followRef.current && ts - lastCamTs.current > 600) {
           lastCamTs.current = ts;
-          map.easeTo({ center: pos, bearing: head, pitch: 60, zoom: 15, duration: 900, easing: (x) => 1 - Math.pow(1 - x, 3) });
+          const preset = POV_PRESET[povRef.current];
+          map.easeTo({ center: pos, bearing: head, pitch: preset.pitch, zoom: preset.zoom, duration: 900, easing: (x) => 1 - Math.pow(1 - x, 3) });
         }
         if (t < 1) animRef.current = requestAnimationFrame(animate);
       };
