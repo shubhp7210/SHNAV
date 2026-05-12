@@ -853,6 +853,26 @@ const StepMonitoring = ({ data, updateData }: Props) => {
           }}
         />
 
+        {/* Adaptive HUD overlay */}
+        <HudOverlay
+          heading={heading}
+          speedKmh={speedKmh}
+          windSpeed={windSpeed}
+          povMode={povMode}
+          autoPov={autoPov}
+          onPovChange={(m) => {
+            if (tacRevertTimerRef.current) {
+              clearTimeout(tacRevertTimerRef.current);
+              tacRevertTimerRef.current = null;
+            }
+            changePov(m, true);
+            haptic([15]);
+          }}
+          onToggleAutoPov={() => setAutoPov((v) => !v)}
+          driftClock={driftClock}
+          driftSeverity={status === "alert" ? "moderate" : "low"}
+        />
+
         {/* Bottom-left controls */}
         <div className="absolute bottom-4 left-4 z-10 flex items-center gap-2">
           {/* Follow / Explore toggle */}
