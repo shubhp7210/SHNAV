@@ -6,6 +6,16 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { FlightAudio, haptic } from "@/lib/flightAudio";
 import { supabase } from "@/integrations/supabase/client";
+import HudOverlay, { type PovMode } from "@/components/flight-plan/HudOverlay";
+
+// POV camera presets
+const POV_PRESET: Record<PovMode, { pitch: number; zoom: number }> = {
+  fpv: { pitch: 72, zoom: 16.2 },   // first-person, low & forward
+  tac: { pitch: 35, zoom: 14.2 },   // tactical / third-person top-down-ish
+  hyb: { pitch: 60, zoom: 15 },     // hybrid (current default)
+};
+const POV_COOLDOWN_MS = 4000;
+const SHARP_TURN_DEG = 35; // heading delta over short window triggers TAC
 
 interface Props {
   data: FlightPlanData;
@@ -285,6 +295,64 @@ const StepMonitoring = ({ data, updateData }: Props) => {
   const [origin, setOrigin]           = useState<[number, number]>([-73.985, 40.748]);
   const [destination, setDestination] = useState<[number, number]>([-73.94, 40.795]);
   const [coordsResolved, setCoordsResolved] = useState(false);
+
+  // ── HUD state ────────────────────────────────────────────────────────────
+  const [heading, setHeading]   = useState(0);
+  const [speedKmh, setSpeedKmh] = useState(0);
+  const [povMode, setPovMode]   = useState<PovMode>("hyb");
+  const [autoPov, setAutoPov]   = useState(true);
+  const [driftClock, setDriftClock] = useState<number | null>(null);
+  const povRef            = useRef<PovMode>("hyb");
+  const lastPovChangeRef  = useRef<number>(0);
+  const lastHeadingRef    = useRef<number>(0);
+  const lastHeadingTsRef  = useRef<number>(0);
+  const tacRevertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const changePov = (next: PovMode, manual = false) => {
+    const now = performance.now();
+    if (!manual && now - lastPovChangeRef.current < POV_COOLDOWN_MS) return;
+    if (povRef.current === next) return;
+    povRef.current = next;
+    lastPovChangeRef.current = now;
+    setPovMode(next);
+  };
+
+  // Wind speed (best-effort from weather intel)
+  const windSpeed = data.atmEngines?.weatherIntel?.origin_weather?.wind_speed ?? null;
+
+  // Compute clock-code drift direction from current pos / heading vs nearest route waypoint
+  const computeDriftClock = (
+    pos: [number, number],
+    nearestPt: [number, number],
+    headingDeg: number,
+  ): number => {
+    const brg = calcBearing(pos, nearestPt);
+    let rel = (brg - headingDeg + 360) % 360;        // 0..360 relative to nose
+    // Map 0..360 → 12 clock positions (12 o'clock = forward)
+    const slot = Math.round(rel / 30);
+    const clk = ((slot - 0 + 11) % 12) + 1;          // 1..12, 12 = forward
+    return clk === 0 ? 12 : clk;
+  };
+
+  // Adaptive POV — detect sharp turn over ~1.5s window, switch to TAC briefly
+  const evaluateAutoPov = (newHeading: number, ts: number) => {
+    if (!autoPov) return;
+    const dt = ts - lastHeadingTsRef.current;
+    if (lastHeadingTsRef.current === 0) {
+      lastHeadingRef.current = newHeading;
+      lastHeadingTsRef.current = ts;
+      return;
+    }
+    if (dt < 1500) return;
+    const delta = Math.abs(((newHeading - lastHeadingRef.current + 540) % 360) - 180);
+    lastHeadingRef.current = newHeading;
+    lastHeadingTsRef.current = ts;
+    if (delta >= SHARP_TURN_DEG && povRef.current !== "tac") {
+      changePov("tac");
+      if (tacRevertTimerRef.current) clearTimeout(tacRevertTimerRef.current);
+      tacRevertTimerRef.current = setTimeout(() => changePov("fpv"), 6000);
+    }
+  };
 
   // Resolve real lat/lon for both endpoints (Nominatim async fallback)
   useEffect(() => {
@@ -599,12 +667,17 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       marker.setRotation(head);
       const src = map.getSource("route-traveled") as maplibregl.GeoJSONSource | undefined;
       src?.setData({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [...pts.slice(0, idx + 1), pos] } });
+      const speedKmhVal = (geo.coords.speed ?? 0) * 3.6;
+      setHeading(head);
+      setSpeedKmh(speedKmhVal);
+      setDriftClock(newStatus === "alert" ? computeDriftClock(pos, pts[idx], head) : null);
+      evaluateAutoPov(head, performance.now());
       if (followRef.current && performance.now() - lastCamTs.current > 600) {
         lastCamTs.current = performance.now();
-        map.easeTo({ center: pos, bearing: head, pitch: 60, zoom: 15, duration: 900, easing: (x) => 1 - Math.pow(1 - x, 3) });
+        const preset = POV_PRESET[povRef.current];
+        map.easeTo({ center: pos, bearing: head, pitch: preset.pitch, zoom: preset.zoom, duration: 900, easing: (x) => 1 - Math.pow(1 - x, 3) });
       }
-      const speedKmh = (geo.coords.speed ?? 0) * 3.6;
-      void persistUpdate(geo.coords.latitude, geo.coords.longitude, head, speedKmh, meters);
+      void persistUpdate(geo.coords.latitude, geo.coords.longitude, head, speedKmhVal, meters);
     };
 
     const startSimulation = () => {
@@ -641,11 +714,16 @@ const StepMonitoring = ({ data, updateData }: Props) => {
         const nextIdx = Math.min(idx + 6, pts.length - 1);
         const head    = calcBearing(pos, pts[nextIdx]);
         marker.setRotation(head);
+        setHeading(head);
+        setSpeedKmh(90);
+        setDriftClock(newStatus === "alert" ? computeDriftClock(pos, pts[idx], head) : null);
+        evaluateAutoPov(head, ts);
         const src = map.getSource("route-traveled") as maplibregl.GeoJSONSource | undefined;
         src?.setData({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: pts.slice(0, idx + 1) } });
         if (followRef.current && ts - lastCamTs.current > 600) {
           lastCamTs.current = ts;
-          map.easeTo({ center: pos, bearing: head, pitch: 60, zoom: 15, duration: 900, easing: (x) => 1 - Math.pow(1 - x, 3) });
+          const preset = POV_PRESET[povRef.current];
+          map.easeTo({ center: pos, bearing: head, pitch: preset.pitch, zoom: preset.zoom, duration: 900, easing: (x) => 1 - Math.pow(1 - x, 3) });
         }
         if (t < 1) animRef.current = requestAnimationFrame(animate);
       };
@@ -773,6 +851,26 @@ const StepMonitoring = ({ data, updateData }: Props) => {
             background:
               "radial-gradient(ellipse at center, transparent 55%, rgba(5,10,20,0.55) 100%)",
           }}
+        />
+
+        {/* Adaptive HUD overlay */}
+        <HudOverlay
+          heading={heading}
+          speedKmh={speedKmh}
+          windSpeed={windSpeed}
+          povMode={povMode}
+          autoPov={autoPov}
+          onPovChange={(m) => {
+            if (tacRevertTimerRef.current) {
+              clearTimeout(tacRevertTimerRef.current);
+              tacRevertTimerRef.current = null;
+            }
+            changePov(m, true);
+            haptic([15]);
+          }}
+          onToggleAutoPov={() => setAutoPov((v) => !v)}
+          driftClock={driftClock}
+          driftSeverity={status === "alert" ? "moderate" : "low"}
         />
 
         {/* Bottom-left controls */}
