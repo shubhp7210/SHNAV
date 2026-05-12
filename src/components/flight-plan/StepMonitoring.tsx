@@ -667,12 +667,17 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       marker.setRotation(head);
       const src = map.getSource("route-traveled") as maplibregl.GeoJSONSource | undefined;
       src?.setData({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [...pts.slice(0, idx + 1), pos] } });
+      const speedKmhVal = (geo.coords.speed ?? 0) * 3.6;
+      setHeading(head);
+      setSpeedKmh(speedKmhVal);
+      setDriftClock(newStatus === "alert" ? computeDriftClock(pos, pts[idx], head) : null);
+      evaluateAutoPov(head, performance.now());
       if (followRef.current && performance.now() - lastCamTs.current > 600) {
         lastCamTs.current = performance.now();
-        map.easeTo({ center: pos, bearing: head, pitch: 60, zoom: 15, duration: 900, easing: (x) => 1 - Math.pow(1 - x, 3) });
+        const preset = POV_PRESET[povRef.current];
+        map.easeTo({ center: pos, bearing: head, pitch: preset.pitch, zoom: preset.zoom, duration: 900, easing: (x) => 1 - Math.pow(1 - x, 3) });
       }
-      const speedKmh = (geo.coords.speed ?? 0) * 3.6;
-      void persistUpdate(geo.coords.latitude, geo.coords.longitude, head, speedKmh, meters);
+      void persistUpdate(geo.coords.latitude, geo.coords.longitude, head, speedKmhVal, meters);
     };
 
     const startSimulation = () => {
