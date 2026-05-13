@@ -15,6 +15,7 @@ interface FlightIntent {
   altitude_band: string;
   departure_window_start: string;
   departure_window_end: string;
+  scheduled_departure?: string | null;
   contingency_landing: string;
   max_speed: string;
   max_altitude: string;
@@ -135,6 +136,7 @@ Deno.serve(async (req) => {
         altitude_band: intent.altitude_band,
         departure_window_start: intent.departure_window_start,
         departure_window_end: intent.departure_window_end,
+        scheduled_departure: intent.scheduled_departure || null,
         contingency_landing: intent.contingency_landing || null,
         max_speed: intent.max_speed || null,
         max_altitude: intent.max_altitude || null,
