@@ -68,6 +68,22 @@
     @apply bg-background text-foreground font-sans antialiased;
     font-feature-settings: "ss01", "cv11";
     -webkit-font-smoothing: antialiased;
+    /* Prevent rubber-banding on iOS while keeping internal scroll containers smooth. */
+    overscroll-behavior-y: none;
+    /* Touch-action manipulation removes the 300ms tap delay on older mobile browsers. */
+    touch-action: manipulation;
+  }
+
+  /* Honor OS-level reduced-motion preferences globally. Individual animations
+     can still opt-in to reduced versions via useReducedMotion(), but this
+     ensures no third-party CSS sneaks past the gate. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 
   /* Refined selection */
@@ -84,6 +100,19 @@
 }
 
 @layer utilities {
+  /* Used by mobile stepper and other horizontal-scroll regions that want
+     to be swipeable without showing a visible scrollbar. */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+
+  /* Safe-area-aware bottom padding for sticky elements above the mobile tab bar. */
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
   .text-gradient-mono {
     @apply bg-clip-text text-transparent;
     background-image: linear-gradient(180deg, hsl(0 0% 100%) 0%, hsl(0 0% 60%) 100%);

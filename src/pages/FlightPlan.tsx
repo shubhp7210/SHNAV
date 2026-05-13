@@ -1,11 +1,10 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   UserCheck,
   Send,
   GitBranch,
-  Eye,
   Shield,
   ArrowLeft,
   ArrowRight,
@@ -21,14 +20,17 @@ import type { ATMEngineState, WeatherIntelligenceResult, AirspaceScheduleResult,
 import StepRegistration from "@/components/flight-plan/StepRegistration";
 import StepIntent from "@/components/flight-plan/StepIntent";
 import StepClearance from "@/components/flight-plan/StepClearance";
-import StepAuthority from "@/components/flight-plan/StepAuthority";
-import StepMonitoring from "@/components/flight-plan/StepMonitoring";
+// StepMonitoring pulls in maplibre-gl (~600 kB) — lazy-load so initial routes
+// stay light, especially on mobile where the user may never reach this step.
+const StepMonitoring = lazy(() => import("@/components/flight-plan/StepMonitoring"));
 
+// Authority Review step removed — the decision engine produces a single
+// authoritative GO/DELAY/REROUTE outcome, so an extra acknowledgment
+// checkbox added latency without operational value.
 const steps = [
   { title: "Registration", icon: UserCheck, description: "Vehicle & Operator Registration" },
   { title: "Flight Intent", icon: Send, description: "Flight Intent Submission" },
   { title: "Clearances", icon: GitBranch, description: "Departure Clearance" },
-  { title: "Authority", icon: Eye, description: "Authority Review" },
   { title: "Monitoring", icon: Shield, description: "In-Flight Monitoring" },
 ];
 
@@ -116,9 +118,6 @@ function validateStep(step: number, data: FlightPlanData): string | null {
     case 2:
       if (!data.analysisComplete || data.atmEngines.atmLoading) return "Analysis is still processing...";
       return null;
-    case 3:
-      if (!data.authorityApproved) return "Authority acknowledgment is required.";
-      return null;
     default:
       return null;
   }
@@ -158,7 +157,8 @@ const FlightPlan = () => {
   const testMap = searchParams.get("test") === "map";
 
   // If ?test=map, jump straight to monitoring with dummy data
-  const [currentStep, setCurrentStep] = useState(testMap ? 4 : isLoggedIn ? 1 : 0);
+  // Steps: 0=Registration, 1=Intent, 2=Clearance, 3=Monitoring (Authority removed)
+  const [currentStep, setCurrentStep] = useState(testMap ? 3 : isLoggedIn ? 1 : 0);
   const [data, setData] = useState<FlightPlanData>(() => ({
     ...initialData,
     aircraftId: user?.user_metadata?.aircraft_id ?? (testMap ? "TEST-001" : ""),
@@ -176,7 +176,7 @@ const FlightPlan = () => {
     } : {}),
   }));
   const [completedSteps, setCompletedSteps] = useState<Set<number>>(
-    testMap ? new Set([0, 1, 2, 3, 4]) : isLoggedIn ? new Set([0]) : new Set()
+    testMap ? new Set([0, 1, 2, 3]) : isLoggedIn ? new Set([0]) : new Set()
   );
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -342,6 +342,12 @@ const FlightPlan = () => {
     }
     setCompletedSteps((prev) => new Set([...prev, currentStep]));
 
+    // Leaving Clearance → Monitoring: persist the chosen route as a learning sample.
+    // (Previously done on Authority approve, but that step is gone.)
+    if (currentStep === 2) {
+      void persistRoutePattern();
+    }
+
     // Trigger all engines when leaving Intent step
     if (currentStep === 1) {
       // Run trajectory analysis first, then ATM engines with results
@@ -486,50 +492,77 @@ const FlightPlan = () => {
     }
   };
 
+  // Authority Review step removed — decision engine output is the source of
+  // truth. Persist learning data on transition from Clearance → Monitoring.
+  const monitoringFallback = (
+    <div className="py-12 flex flex-col items-center gap-3 text-center">
+      <div className="w-8 h-8 rounded-full border-2 border-primary/30 border-t-primary animate-spin" />
+      <p className="text-sm text-muted-foreground font-mono">Loading 3D map…</p>
+    </div>
+  );
   const stepComponents = [
     <StepRegistration data={data} updateData={updateData} />,
     <StepIntent data={data} updateData={updateData} />,
     <StepClearance data={data} updateData={updateData} onSelectRoute={applyRouteSelection} />,
-    <StepAuthority data={data} updateData={updateData} onApprove={persistRoutePattern} />,
-    <StepMonitoring data={data} updateData={updateData} />,
+    <Suspense fallback={monitoringFallback}>
+      <StepMonitoring data={data} updateData={updateData} />
+    </Suspense>,
   ];
 
+  // Hide the Registration step from the stepper when the user is signed in
+  // (it's auto-prefilled from their profile, so it adds visual noise).
+  const visibleSteps = steps
+    .map((s, i) => ({ ...s, idx: i }))
+    .filter((s) => !(s.idx === 0 && isLoggedIn));
+  const visibleStepCount = visibleSteps.length;
+  const visiblePosition = visibleSteps.findIndex((s) => s.idx === currentStep) + 1;
+
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background flex flex-col">
       <header className="border-b border-border/50 bg-card/40 backdrop-blur-xl sticky top-0 z-50">
-        <div className="container flex items-center justify-between h-16">
+        <div className="container flex items-center justify-between h-14 sm:h-16 px-4 sm:px-6">
           <button
             onClick={() => navigate("/")}
-            className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors"
+            className="flex items-center gap-1.5 sm:gap-2 min-h-[40px] px-2 -ml-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary/40 transition-colors"
+            aria-label="Back to home"
           >
             <ArrowLeft className="w-4 h-4" />
             <span className="text-sm font-mono">Back</span>
           </button>
-          <div className="flex items-center gap-2">
-            <Plane className="w-4 h-4 text-primary" />
-            <span className="font-semibold text-sm">Altos — Flight Planner</span>
+          <div className="flex items-center gap-2 min-w-0">
+            <Plane className="w-4 h-4 text-primary shrink-0" />
+            <span className="font-semibold text-sm truncate">
+              <span className="hidden sm:inline">Altos — </span>Flight Planner
+            </span>
           </div>
         </div>
       </header>
 
-      <div className="container py-8">
-        <div className="mb-10">
-          <div className="flex items-center justify-between max-w-3xl mx-auto">
-            {steps.map((step, i) => {
-              // Hide registration step when logged in (it's already pre-filled)
-              if (i === 0 && isLoggedIn) return null;
-              const isActive = i === currentStep;
-              const isCompleted = completedSteps.has(i);
+      {/* pb-28 sm:pb-12 leaves room for the mobile bottom tab bar (52 + safe-area + sticky CTA). */}
+      <div
+        className="container px-4 sm:px-6 py-4 sm:py-8 flex-1"
+        style={{ paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 7rem)" }}
+      >
+        {/* Stepper: scrollable on mobile, full-width on desktop. Labels hidden < md to save horizontal space. */}
+        <div className="mb-6 sm:mb-10">
+          <div className="flex items-center justify-between max-w-3xl mx-auto gap-1 overflow-x-auto no-scrollbar">
+            {visibleSteps.map(({ idx, title, icon: Icon }, i) => {
+              const isActive = idx === currentStep;
+              const isCompleted = completedSteps.has(idx);
+              const canJump = isCompleted || idx <= currentStep;
               return (
-                <div key={step.title} className="flex items-center">
+                <div key={title} className="flex items-center shrink-0">
                   <button
-                    onClick={() => (isCompleted || i <= currentStep) && setCurrentStep(i)}
-                    className={`flex flex-col items-center gap-2 group transition-all ${
-                      isCompleted || i <= currentStep ? "cursor-pointer" : "cursor-not-allowed opacity-40"
+                    onClick={() => canJump && setCurrentStep(idx)}
+                    aria-current={isActive ? "step" : undefined}
+                    aria-label={`Step ${i + 1} of ${visibleStepCount}: ${title}${isCompleted ? " (completed)" : ""}`}
+                    disabled={!canJump}
+                    className={`flex flex-col items-center gap-1.5 sm:gap-2 group transition-all min-w-[48px] min-h-[44px] px-1 ${
+                      canJump ? "cursor-pointer" : "cursor-not-allowed opacity-40"
                     }`}
                   >
                     <div
-                      className={`w-10 h-10 rounded-full flex items-center justify-center transition-all ${
+                      className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center transition-all ${
                         isActive
                           ? "bg-primary text-primary-foreground glow-primary"
                           : isCompleted
@@ -537,23 +570,19 @@ const FlightPlan = () => {
                           : "bg-secondary text-muted-foreground"
                       }`}
                     >
-                      {isCompleted ? (
-                        <Check className="w-4 h-4" />
-                      ) : (
-                        <step.icon className="w-4 h-4" />
-                      )}
+                      {isCompleted ? <Check className="w-4 h-4" /> : <Icon className="w-4 h-4" />}
                     </div>
                     <span
-                      className={`text-xs font-mono hidden md:block ${
+                      className={`text-[10px] sm:text-xs font-mono hidden sm:block whitespace-nowrap ${
                         isActive ? "text-primary" : "text-muted-foreground"
                       }`}
                     >
-                      {step.title}
+                      {title}
                     </span>
                   </button>
-                  {i < steps.length - 1 && (
+                  {i < visibleStepCount - 1 && (
                     <div
-                      className={`w-8 lg:w-16 h-px mx-1 ${
+                      className={`w-6 sm:w-10 lg:w-16 h-px mx-0.5 sm:mx-1 ${
                         isCompleted ? "bg-primary/50" : "bg-border"
                       }`}
                     />
@@ -568,45 +597,54 @@ const FlightPlan = () => {
           <AnimatePresence mode="wait">
             <motion.div
               key={currentStep}
-              initial={{ opacity: 0, x: 20 }}
+              initial={{ opacity: 0, x: 16 }}
               animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              transition={{ duration: 0.3 }}
+              exit={{ opacity: 0, x: -16 }}
+              transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
             >
-              <div className="mb-6">
-                <span className="text-primary font-mono text-xs tracking-widest uppercase">
-                  Step {isLoggedIn ? currentStep : currentStep + 1} of {isLoggedIn ? steps.length - 1 : steps.length}
+              <div className="mb-4 sm:mb-6">
+                <span className="text-primary font-mono text-[10px] sm:text-xs tracking-widest uppercase">
+                  Step {visiblePosition} of {visibleStepCount}
                 </span>
-                <h2 className="text-2xl md:text-3xl font-bold mt-1">
+                <h2 className="text-xl sm:text-2xl md:text-3xl font-bold mt-1">
                   {steps[currentStep].description}
                 </h2>
               </div>
 
-              <div className="glass-card rounded-xl p-6 md:p-8">
+              <div className="glass-card rounded-xl p-4 sm:p-6 md:p-8">
                 {stepComponents[currentStep]}
               </div>
             </motion.div>
           </AnimatePresence>
+        </div>
+      </div>
 
-          <div className="flex justify-between mt-8">
-            <button
-              onClick={goBack}
-              disabled={currentStep === 0}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-md border border-border text-foreground disabled:opacity-30 disabled:cursor-not-allowed hover:bg-secondary transition-colors"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              Previous
-            </button>
-            <button
-              onClick={completeStep}
-              disabled={data.analysisLoading || data.atmEngines.atmLoading}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity font-medium disabled:opacity-50"
-            >
-              {currentStep === steps.length - 1 ? (
-                completedSteps.has(steps.length - 1) ? "Mission Active ✓" : "Activate Monitoring"
-              ) : (
-                <>
-                  Continue
+      {/* Sticky action bar — stays accessible on every step without scrolling.
+          Sits above the mobile tab bar via safe-area-aware padding. */}
+      <div
+        className="sticky bottom-0 z-30 border-t border-border/50 bg-card/80 backdrop-blur-xl"
+        style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
+      >
+        <div className="container max-w-3xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-3 md:pb-3" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom, 0px))" }}>
+          <button
+            onClick={goBack}
+            disabled={currentStep === 0}
+            className="flex items-center gap-2 px-4 sm:px-5 py-2.5 min-h-[44px] rounded-md border border-border text-foreground disabled:opacity-30 disabled:cursor-not-allowed hover:bg-secondary transition-colors text-sm font-medium"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span className="hidden sm:inline">Previous</span>
+            <span className="sm:hidden">Back</span>
+          </button>
+          <button
+            onClick={completeStep}
+            disabled={data.analysisLoading || data.atmEngines.atmLoading}
+            className="flex items-center gap-2 px-5 sm:px-6 py-2.5 min-h-[44px] rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity font-medium disabled:opacity-50 text-sm"
+          >
+            {currentStep === steps.length - 1 ? (
+              completedSteps.has(steps.length - 1) ? "Mission Active ✓" : "Activate Monitoring"
+            ) : (
+              <>
+                Continue
                   <ArrowRight className="w-4 h-4" />
                 </>
               )}
@@ -614,7 +652,6 @@ const FlightPlan = () => {
           </div>
         </div>
       </div>
-    </div>
   );
 };
 

@@ -191,35 +191,75 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!user && !BYPASS_AUTH) return;
-    // Active flights only — exclude landed/archived
-    supabase
-      .from("flight_intents")
-      .select("id,aircraft_id,origin,destination,trajectory_score,status,weather_risk,conflicts,created_at")
-      .not("status", "in", "(landed,archived)")
-      .order("created_at", { ascending: false })
-      .limit(12)
-      .then(({ data, error }) => {
-        if (!error) setFlights((data as FlightRecord[]) ?? []);
-        setLoadingFlights(false);
-      });
 
-    // Historical / completed flights
-    supabase
-      .from("historical_flights")
-      .select("id,aircraft_id,origin,destination,trajectory_score,weather_risk,conflicts,scheduled_departure,landed_at,archived_at")
-      .order("archived_at", { ascending: false })
-      .limit(20)
-      .then(({ data }) => {
-        if (data) setHistorical(data as HistoricalFlight[]);
-      });
+    // Track unmount so we don't setState on an unmounted component if the
+    // user navigates away mid-fetch (common with maplibre + heavy initial loads).
+    let cancelled = false;
+    setLoadingFlights(true);
 
-    supabase.from("flight_decisions").select("decision").then(({ data }) => {
-      if (!data) return;
-      const counts: Record<string, number> = {};
-      data.forEach((r: any) => { counts[r.decision] = (counts[r.decision] ?? 0) + 1; });
-      setDecisions(Object.entries(counts).map(([decision, count]) => ({ decision, count: count as number })));
-    });
-  }, [user]);
+    const loadDashboardData = async () => {
+      try {
+        const [intentsRes, historicalRes, decisionsRes] = await Promise.allSettled([
+          supabase
+            .from("flight_intents")
+            .select("id,aircraft_id,origin,destination,trajectory_score,status,weather_risk,conflicts,created_at")
+            .not("status", "in", "(landed,archived)")
+            .order("created_at", { ascending: false })
+            .limit(12),
+          supabase
+            .from("historical_flights")
+            .select("id,aircraft_id,origin,destination,trajectory_score,weather_risk,conflicts,scheduled_departure,landed_at,archived_at")
+            .order("archived_at", { ascending: false })
+            .limit(20),
+          supabase.from("flight_decisions").select("decision"),
+        ]);
+
+        if (cancelled) return;
+
+        // Active flights
+        if (intentsRes.status === "fulfilled") {
+          if (intentsRes.value.error) {
+            console.error("[Dashboard] flight_intents fetch failed", intentsRes.value.error);
+            toast({
+              title: "Couldn't load active flights",
+              description: intentsRes.value.error.message,
+              variant: "destructive",
+            });
+          } else {
+            setFlights((intentsRes.value.data as FlightRecord[]) ?? []);
+          }
+        } else {
+          console.error("[Dashboard] flight_intents rejected", intentsRes.reason);
+        }
+
+        // Historical flights
+        if (historicalRes.status === "fulfilled" && !historicalRes.value.error && historicalRes.value.data) {
+          setHistorical(historicalRes.value.data as HistoricalFlight[]);
+        } else if (historicalRes.status === "fulfilled" && historicalRes.value.error) {
+          console.error("[Dashboard] historical_flights fetch failed", historicalRes.value.error);
+        }
+
+        // Decision counts (non-blocking — silent failure is fine for analytics)
+        if (decisionsRes.status === "fulfilled" && !decisionsRes.value.error && decisionsRes.value.data) {
+          const counts: Record<string, number> = {};
+          decisionsRes.value.data.forEach((r: { decision: string }) => {
+            counts[r.decision] = (counts[r.decision] ?? 0) + 1;
+          });
+          setDecisions(
+            Object.entries(counts).map(([decision, count]) => ({ decision, count: count as number }))
+          );
+        }
+      } finally {
+        if (!cancelled) setLoadingFlights(false);
+      }
+    };
+
+    void loadDashboardData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, toast]);
 
   const handleSignOut = async () => {
     await signOut();
@@ -308,19 +348,15 @@ export default function Dashboard() {
       {/* ── Main content ── */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
-        <header className="flex items-center justify-between px-6 h-16 border-b border-border/30 bg-card/20 backdrop-blur-xl shrink-0 sticky top-0 z-10">
-          <div>
-            <p className="text-xs font-mono text-muted-foreground tracking-widest uppercase">Operations Center</p>
-            <h1 className="text-sm font-semibold leading-tight">Welcome back, <span className="text-primary">{displayName}</span></h1>
+        <header className="flex items-center justify-between gap-3 px-4 sm:px-6 h-14 sm:h-16 border-b border-border/30 bg-card/20 backdrop-blur-xl shrink-0 sticky top-0 z-10">
+          <div className="min-w-0 flex-1">
+            <p className="hidden sm:block text-xs font-mono text-muted-foreground tracking-widest uppercase">Operations Center</p>
+            <h1 className="text-sm font-semibold leading-tight truncate">
+              <span className="text-muted-foreground/80 hidden sm:inline">Welcome back,</span>
+              <span className="text-primary"> {displayName}</span>
+            </h1>
           </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => navigate("/")}
-              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-border/40 text-xs font-mono text-muted-foreground hover:text-foreground hover:border-border transition-colors"
-            >
-              <Home className="w-3.5 h-3.5" />
-              Home
-            </button>
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
             <div className="hidden sm:flex items-center gap-2 bg-secondary/40 rounded-xl px-3 py-1.5 border border-border/30">
               <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
               <span className="text-xs font-mono text-muted-foreground">{clock} UTC</span>
@@ -328,21 +364,30 @@ export default function Dashboard() {
             <motion.button
               whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
               onClick={() => navigate("/plan")}
-              className="flex items-center gap-2 bg-primary text-primary-foreground rounded-xl px-4 py-2 text-xs font-semibold shadow-lg shadow-primary/25 hover:opacity-90 transition-opacity"
+              className="flex items-center gap-1.5 sm:gap-2 bg-primary text-primary-foreground rounded-xl px-3 sm:px-4 py-2 min-h-[40px] text-xs font-semibold shadow-lg shadow-primary/25 hover:opacity-90 transition-opacity"
+              aria-label="Plan a new flight"
             >
               <Plus className="w-3.5 h-3.5" />
-              Plan Flight
+              <span className="hidden xs:inline">Plan</span>
+              <span className="hidden sm:inline">&nbsp;Flight</span>
             </motion.button>
-            {/* Mobile sign out */}
-            <button onClick={handleSignOut} className="md:hidden p-2 text-muted-foreground hover:text-foreground">
+            <button
+              onClick={handleSignOut}
+              className="md:hidden p-2 min-h-[40px] min-w-[40px] rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary/40 transition-colors"
+              aria-label="Sign out"
+            >
               <LogOut className="w-4 h-4" />
             </button>
           </div>
         </header>
 
         {/* Page body */}
-        <main className="flex-1 overflow-y-auto px-6 py-6">
-          <motion.div variants={stagger} initial="hidden" animate="show" className="max-w-5xl mx-auto space-y-6">
+        {/* pb-24 reserves space for the mobile bottom tab bar (+ safe area); desktop uses standard padding. */}
+        <main
+          className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 sm:py-6 pb-24 md:pb-6"
+          style={{ paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 6rem)" }}
+        >
+          <motion.div variants={stagger} initial="hidden" animate="show" className="max-w-5xl mx-auto space-y-4 sm:space-y-6">
 
             {/* ── Row 1: Stats + Mini Map ── */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

@@ -863,10 +863,13 @@ const StepMonitoring = ({ data, updateData }: Props) => {
         />
       </div>
 
-      {/* ── 3D Map ────────────────────────────────────────────────────── */}
+      {/* ── 3D Map ──────────────────────────────────────────────────────
+          Height adapts to viewport. On mobile we use ~62vh (or 62svh where
+          supported) so the map dominates without overflowing under the
+          sticky action bar; on desktop we fall back to a fixed 460px. */}
       <div
-        className="relative w-full rounded-xl overflow-hidden border border-primary/20"
-        style={{ height: "460px", boxShadow: "0 0 40px -8px rgba(45,212,191,0.2)" }}
+        className="relative w-full rounded-xl overflow-hidden border border-primary/20 h-[62svh] min-h-[360px] md:h-[460px]"
+        style={{ boxShadow: "0 0 40px -8px rgba(45,212,191,0.2)" }}
       >
         <div ref={mapContainer} className="absolute inset-0" />
 
@@ -899,9 +902,9 @@ const StepMonitoring = ({ data, updateData }: Props) => {
           driftSeverity={status === "alert" ? "moderate" : "low"}
         />
 
-        {/* Bottom-left controls */}
-        <div className="absolute bottom-4 left-4 z-10 flex items-center gap-2">
-          {/* Follow / Explore toggle */}
+        {/* Bottom-left controls — touch targets are 40px min-height so they
+            are comfortable on mobile (Apple HIG / Material Design guideline). */}
+        <div className="absolute bottom-3 left-3 sm:bottom-4 sm:left-4 z-10 flex items-center gap-2">
           <button
             onClick={() => {
               const next = !followRef.current;
@@ -909,20 +912,20 @@ const StepMonitoring = ({ data, updateData }: Props) => {
               setFollowMode(next);
               haptic([20]);
             }}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full
+            aria-pressed={followMode}
+            className={`flex items-center gap-1.5 px-3 py-2 min-h-[40px] rounded-full
               text-[11px] font-mono font-semibold border backdrop-blur-md transition-all duration-200
               ${followMode
                 ? "bg-primary/20 border-primary/50 text-primary shadow-[0_0_14px_-2px_rgba(45,212,191,0.45)]"
-                : "bg-black/50 border-white/10 text-white/50 hover:border-white/25"
+                : "bg-black/50 border-white/10 text-white/60 hover:border-white/25"
               }`}
           >
             {followMode
-              ? <><Lock className="w-3 h-3" />Following</>
-              : <><Unlock className="w-3 h-3" />Explore</>
+              ? <><Lock className="w-3.5 h-3.5" />Following</>
+              : <><Unlock className="w-3.5 h-3.5" />Explore</>
             }
           </button>
 
-          {/* Mute / Unmute */}
           <button
             onClick={() => {
               const next = !muted;
@@ -930,21 +933,20 @@ const StepMonitoring = ({ data, updateData }: Props) => {
               audioRef.current?.setMuted(next);
               haptic([15]);
             }}
-            className="flex items-center justify-center w-7 h-7 rounded-full
-              bg-black/50 border border-white/10 text-white/50
+            aria-pressed={muted}
+            aria-label={muted ? "Unmute audio" : "Mute audio"}
+            className="flex items-center justify-center w-10 h-10 rounded-full
+              bg-black/50 border border-white/10 text-white/60
               hover:border-white/25 hover:text-white/80 backdrop-blur-md
               transition-all duration-200"
             title={muted ? "Unmute" : "Mute"}
           >
-            {muted
-              ? <VolumeX className="w-3 h-3" />
-              : <Volume2 className="w-3 h-3" />
-            }
+            {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
           </button>
         </div>
 
-        {/* Hint text */}
-        <div className="absolute top-3 left-3 z-10 pointer-events-none">
+        {/* Hint text — desktop-only to reduce mobile clutter */}
+        <div className="hidden md:block absolute top-3 left-3 z-10 pointer-events-none">
           <p className="text-[10px] font-mono text-white/30 leading-4">
             Scroll · Drag · Pinch to explore
           </p>
