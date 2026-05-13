@@ -41,6 +41,7 @@ export interface FlightPlanData {
   altitudeBand: string;
   departureWindowStart: string;
   departureWindowEnd: string;
+  departureDate: string; // YYYY-MM-DD — full date for future scheduling
   conflicts: number;
   trajectoryScore: number;
   weatherRisk: string;
@@ -77,6 +78,7 @@ const initialData: FlightPlanData = {
   altitudeBand: "low",
   departureWindowStart: "",
   departureWindowEnd: "",
+  departureDate: new Date().toISOString().split("T")[0],
   conflicts: 0,
   trajectoryScore: 0,
   weatherRisk: "low",
@@ -357,6 +359,9 @@ const FlightPlan = () => {
               altitude_band: data.altitudeBand,
               departure_window_start: data.departureWindowStart,
               departure_window_end: data.departureWindowEnd,
+              scheduled_departure: data.departureDate && data.departureWindowStart
+                ? new Date(`${data.departureDate}T${data.departureWindowStart}:00`).toISOString()
+                : null,
             },
           });
           if (error) throw new Error(error.message);

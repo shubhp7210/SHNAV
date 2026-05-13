@@ -193,6 +193,20 @@ const StepIntent = ({ data, updateData }: Props) => {
           placeholder="Search for a city or address..."
         />
 
+        <div className="space-y-2 md:col-span-2">
+          <label className="text-sm font-medium text-foreground">Departure Date</label>
+          <input
+            type="date"
+            value={data.departureDate}
+            min={new Date().toISOString().split("T")[0]}
+            onChange={(e) => updateData({ departureDate: e.target.value })}
+            className="w-full px-4 py-2.5 rounded-md bg-secondary border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm font-mono"
+          />
+          <p className="text-[11px] text-muted-foreground font-mono">
+            Schedule a flight today or any future date.
+          </p>
+        </div>
+
         <div className="space-y-2">
           <label className="text-sm font-medium text-foreground">Departure Window Start</label>
           <input
