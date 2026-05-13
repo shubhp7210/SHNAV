@@ -174,6 +174,7 @@ export type Database = {
           aircraft_id: string
           aircraft_type: string
           altitude_band: string
+          archived_at: string | null
           authority_approved: boolean | null
           conflicts: number | null
           contingency_landing: string | null
@@ -182,10 +183,12 @@ export type Database = {
           departure_window_start: string
           destination: string
           id: string
+          landed_at: string | null
           max_altitude: string | null
           max_speed: string | null
           operator_name: string
           origin: string
+          scheduled_departure: string | null
           selected_clearance: string | null
           status: string
           trajectory_score: number | null
@@ -197,6 +200,7 @@ export type Database = {
           aircraft_id: string
           aircraft_type?: string
           altitude_band?: string
+          archived_at?: string | null
           authority_approved?: boolean | null
           conflicts?: number | null
           contingency_landing?: string | null
@@ -205,10 +209,12 @@ export type Database = {
           departure_window_start: string
           destination: string
           id?: string
+          landed_at?: string | null
           max_altitude?: string | null
           max_speed?: string | null
           operator_name: string
           origin: string
+          scheduled_departure?: string | null
           selected_clearance?: string | null
           status?: string
           trajectory_score?: number | null
@@ -220,6 +226,7 @@ export type Database = {
           aircraft_id?: string
           aircraft_type?: string
           altitude_band?: string
+          archived_at?: string | null
           authority_approved?: boolean | null
           conflicts?: number | null
           contingency_landing?: string | null
@@ -228,14 +235,79 @@ export type Database = {
           departure_window_start?: string
           destination?: string
           id?: string
+          landed_at?: string | null
           max_altitude?: string | null
           max_speed?: string | null
           operator_name?: string
           origin?: string
+          scheduled_departure?: string | null
           selected_clearance?: string | null
           status?: string
           trajectory_score?: number | null
           updated_at?: string
+          user_id?: string | null
+          weather_risk?: string | null
+        }
+        Relationships: []
+      }
+      historical_flights: {
+        Row: {
+          aircraft_id: string
+          archived_at: string
+          conflicts: number | null
+          created_at: string
+          departure_window_end: string | null
+          departure_window_start: string | null
+          destination: string
+          final_status: string
+          flight_intent_id: string
+          id: string
+          landed_at: string | null
+          operator_name: string
+          origin: string
+          scheduled_departure: string | null
+          selected_clearance: string | null
+          trajectory_score: number | null
+          user_id: string | null
+          weather_risk: string | null
+        }
+        Insert: {
+          aircraft_id: string
+          archived_at?: string
+          conflicts?: number | null
+          created_at?: string
+          departure_window_end?: string | null
+          departure_window_start?: string | null
+          destination: string
+          final_status?: string
+          flight_intent_id: string
+          id?: string
+          landed_at?: string | null
+          operator_name: string
+          origin: string
+          scheduled_departure?: string | null
+          selected_clearance?: string | null
+          trajectory_score?: number | null
+          user_id?: string | null
+          weather_risk?: string | null
+        }
+        Update: {
+          aircraft_id?: string
+          archived_at?: string
+          conflicts?: number | null
+          created_at?: string
+          departure_window_end?: string | null
+          departure_window_start?: string | null
+          destination?: string
+          final_status?: string
+          flight_intent_id?: string
+          id?: string
+          landed_at?: string | null
+          operator_name?: string
+          origin?: string
+          scheduled_departure?: string | null
+          selected_clearance?: string | null
+          trajectory_score?: number | null
           user_id?: string | null
           weather_risk?: string | null
         }
