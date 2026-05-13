@@ -27,11 +27,29 @@ interface FlightRecord {
   created_at: string;
 }
 
+interface HistoricalFlight {
+  id: string;
+  aircraft_id: string;
+  origin: string;
+  destination: string;
+  trajectory_score: number;
+  weather_risk: string | null;
+  conflicts: number;
+  scheduled_departure: string | null;
+  landed_at: string | null;
+  archived_at: string;
+}
+
 const STATUS_CONFIG: Record<string, { label: string; color: string; dot: string }> = {
   pending:   { label: "Pending",   color: "text-amber-400",   dot: "bg-amber-400" },
+  scheduled: { label: "Scheduled", color: "text-sky-400",     dot: "bg-sky-400" },
   approved:  { label: "Approved",  color: "text-emerald-400", dot: "bg-emerald-400" },
+  boarding:  { label: "Boarding",  color: "text-violet-400",  dot: "bg-violet-400 animate-pulse" },
+  in_air:    { label: "In Air",    color: "text-cyan-400",    dot: "bg-cyan-400 animate-pulse" },
   active:    { label: "Active",    color: "text-cyan-400",    dot: "bg-cyan-400 animate-pulse" },
   analyzing: { label: "Analyzing", color: "text-blue-400",    dot: "bg-blue-400 animate-pulse" },
+  landed:    { label: "Landed",    color: "text-zinc-400",    dot: "bg-zinc-400" },
+  archived:  { label: "Archived",  color: "text-zinc-500",    dot: "bg-zinc-500" },
   completed: { label: "Completed", color: "text-zinc-500",    dot: "bg-zinc-500" },
 };
 
@@ -152,6 +170,7 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [flights, setFlights]         = useState<FlightRecord[]>([]);
+  const [historical, setHistorical]   = useState<HistoricalFlight[]>([]);
   const [loadingFlights, setLoadingFlights] = useState(true);
   const [decisions, setDecisions]     = useState<{ decision: string; count: number }[]>([]);
   const [activeNav, setActiveNav]     = useState("overview");
@@ -172,14 +191,26 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!user && !BYPASS_AUTH) return;
+    // Active flights only — exclude landed/archived
     supabase
       .from("flight_intents")
       .select("id,aircraft_id,origin,destination,trajectory_score,status,weather_risk,conflicts,created_at")
+      .not("status", "in", "(landed,archived)")
       .order("created_at", { ascending: false })
       .limit(12)
       .then(({ data, error }) => {
         if (!error) setFlights((data as FlightRecord[]) ?? []);
         setLoadingFlights(false);
+      });
+
+    // Historical / completed flights
+    supabase
+      .from("historical_flights")
+      .select("id,aircraft_id,origin,destination,trajectory_score,weather_risk,conflicts,scheduled_departure,landed_at,archived_at")
+      .order("archived_at", { ascending: false })
+      .limit(20)
+      .then(({ data }) => {
+        if (data) setHistorical(data as HistoricalFlight[]);
       });
 
     supabase.from("flight_decisions").select("decision").then(({ data }) => {
