@@ -1,10 +1,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { CORS_HEADERS } from "../_shared/constants.ts";
+import { getCoordsObj as getCoords } from "../_shared/geocode.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
+const corsHeaders = CORS_HEADERS;
 
 interface FlightIntent {
   aircraft_id: string;
@@ -21,48 +19,12 @@ interface FlightIntent {
   max_altitude: string;
 }
 
-// Coordinate lookup with quick fallback table; falls back to Nominatim geocoding for anything else.
-const LOCATION_COORDS: Record<string, { lat: number; lon: number }> = {
-  "new york": { lat: 40.748, lon: -73.985 },
-  "nyc":      { lat: 40.748, lon: -73.985 },
-  "boston":   { lat: 42.361, lon: -71.057 },
-  "chicago":  { lat: 41.883, lon: -87.623 },
-  "los angeles": { lat: 34.052, lon: -118.243 },
-  "san francisco": { lat: 37.774, lon: -122.419 },
-  "miami":    { lat: 25.761, lon: -80.191 },
-  "seattle":  { lat: 47.606, lon: -122.332 },
-  "london":   { lat: 51.509, lon: -0.118 },
-  "paris":    { lat: 48.864, lon: 2.349 },
-  "tokyo":    { lat: 35.69,  lon: 139.692 },
-  "default":  { lat: 40.7128, lon: -74.006 },
-};
-
-async function getCoords(location: string): Promise<{ lat: number; lon: number }> {
-  if (!location) return LOCATION_COORDS["default"];
-  // Tagged "name @ lat,lon"
-  const tagged = location.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (tagged) {
-    const lat = parseFloat(tagged[1]);
-    const lon = parseFloat(tagged[2]);
-    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return { lat, lon };
-  }
-  const key = location.toLowerCase().trim();
-  for (const [k, v] of Object.entries(LOCATION_COORDS)) {
-    if (k !== "default" && key.includes(k)) return v;
-  }
-  // Nominatim fallback for unknown addresses
-  try {
-    const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(location)}`,
-      { headers: { "User-Agent": "Altos-ATM/1.0", "Accept-Language": "en" } }
-    );
-    const arr = await res.json();
-    if (Array.isArray(arr) && arr[0]?.lat && arr[0]?.lon) {
-      return { lat: parseFloat(arr[0].lat), lon: parseFloat(arr[0].lon) };
-    }
-  } catch (_e) { /* fall through */ }
-  return LOCATION_COORDS["default"];
-}
+// NOTE: this function still uses its own inline weather risk classifier
+// (lines that compute `weatherRisk` from windSpeed/gusts/precip/code) rather
+// than the shared `computeRisk`/`riskLevel` from `_shared/weather.ts`. The
+// thresholds are different (e.g. moderate wind here = >30 km/h vs >20 km/h
+// shared), so swapping them is a behavior change that belongs in a follow-up
+// PR — see docs/MODERNIZATION_STRATEGY.md item 3.
 
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);

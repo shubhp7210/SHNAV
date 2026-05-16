@@ -1,113 +1,14 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { CORS_HEADERS } from "../_shared/constants.ts";
+import { getCoords } from "../_shared/geocode.ts";
+import {
+  computeRisk,
+  riskLevel,
+  weatherCodeToDescription,
+} from "../_shared/weather.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
-
-// Known city coordinates for location lookup
-const CITY_COORDS: Record<string, [number, number]> = {
-  "new york": [40.7128, -74.006], "nyc": [40.7128, -74.006],
-  "los angeles": [34.0522, -118.2437], "la": [34.0522, -118.2437],
-  "chicago": [41.8781, -87.6298], "miami": [25.7617, -80.1918],
-  "san francisco": [37.7749, -122.4194], "sf": [37.7749, -122.4194],
-  "houston": [29.7604, -95.3698], "boston": [42.3601, -71.0589],
-  "seattle": [47.6062, -122.3321], "dallas": [32.7767, -96.797],
-  "atlanta": [33.749, -84.388], "denver": [39.7392, -104.9903],
-  "london": [51.5074, -0.1278], "dubai": [25.2048, 55.2708],
-  "tokyo": [35.6762, 139.6503], "singapore": [1.3521, 103.8198],
-};
-
-function parseTaggedCoords(location: string): [number, number] | null {
-  const tagged = location.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (tagged) {
-    const lat = parseFloat(tagged[1]);
-    const lon = parseFloat(tagged[2]);
-    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
-  }
-
-  const bare = location.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (bare) {
-    const lat = parseFloat(bare[1]);
-    const lon = parseFloat(bare[2]);
-    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
-  }
-
-  return null;
-}
-
-async function getCoords(location: string): Promise<[number, number]> {
-  if (!location?.trim()) return [40.7128, -74.006];
-
-  const parsed = parseTaggedCoords(location);
-  if (parsed) return parsed;
-
-  const lower = location.toLowerCase().trim();
-  for (const [key, coords] of Object.entries(CITY_COORDS)) {
-    if (lower.includes(key)) return coords;
-  }
-
-  try {
-    const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(location)}`,
-      { headers: { "User-Agent": "Altos-ATM/1.0", "Accept-Language": "en" } }
-    );
-    const arr = await res.json();
-    if (Array.isArray(arr) && arr[0]?.lat && arr[0]?.lon) {
-      return [parseFloat(arr[0].lat), parseFloat(arr[0].lon)];
-    }
-  } catch (error) {
-    console.error("Weather geocode failed:", error);
-  }
-
-  return [40.7128, -74.006];
-}
-
-function weatherCodeToDescription(code: number): string {
-  if (code === 0) return "Clear";
-  if (code <= 3) return "Partly cloudy";
-  if (code <= 9) return "Overcast";
-  if (code <= 19) return "Fog";
-  if (code <= 29) return "Drizzle";
-  if (code <= 39) return "Freezing drizzle";
-  if (code <= 49) return "Fog";
-  if (code <= 59) return "Drizzle";
-  if (code <= 69) return "Rain";
-  if (code <= 79) return "Snow";
-  if (code <= 84) return "Rain showers";
-  if (code <= 94) return "Snow showers";
-  return "Thunderstorm";
-}
-
-function computeRisk(windSpeed: number, gusts: number, precip: number, weatherCode: number): number {
-  let risk = 0;
-  // Wind
-  if (windSpeed > 50) risk += 40;
-  else if (windSpeed > 35) risk += 25;
-  else if (windSpeed > 20) risk += 12;
-  else if (windSpeed > 10) risk += 4;
-  // Gusts
-  if (gusts > 60) risk += 30;
-  else if (gusts > 40) risk += 18;
-  else if (gusts > 25) risk += 8;
-  // Precipitation
-  if (precip > 5) risk += 20;
-  else if (precip > 2) risk += 12;
-  else if (precip > 0.5) risk += 5;
-  // Weather code
-  if (weatherCode >= 95) risk += 30; // Thunderstorm
-  else if (weatherCode >= 80) risk += 15; // Showers
-  else if (weatherCode >= 61) risk += 10; // Rain
-  else if (weatherCode >= 51) risk += 6; // Drizzle
-  return Math.min(100, risk);
-}
-
-function riskLevel(score: number): "low" | "moderate" | "high" {
-  if (score >= 60) return "high";
-  if (score >= 30) return "moderate";
-  return "low";
-}
+const corsHeaders = CORS_HEADERS;
 
 // Micro-weather urban effects: amplify wind gusts near city centers
 function applyMicroWeather(lat: number, lon: number, windSpeed: number, gusts: number, temp: number) {

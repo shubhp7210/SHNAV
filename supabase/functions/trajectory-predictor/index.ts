@@ -1,91 +1,20 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  CORS_HEADERS,
+  EVTOL_BASE_SPEED_KMH as EVTOL_SPEED_KMH,
+  MIN_SEPARATION_KM,
+} from "../_shared/constants.ts";
+import { getCoords } from "../_shared/geocode.ts";
+import { haversineKm, interpolatePosition } from "../_shared/geo.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
+const corsHeaders = CORS_HEADERS;
 
-const EVTOL_SPEED_KMH = 90;
-const MIN_SEPARATION_KM = 0.5;
-
-function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-// Interpolate position along great-circle path given progress 0..1
-function interpolatePosition(
-  oLat: number, oLon: number,
-  dLat: number, dLon: number,
-  progress: number
-): { lat: number; lon: number } {
-  return {
-    lat: oLat + (dLat - oLat) * progress,
-    lon: oLon + (dLon - oLon) * progress,
-  };
-}
-
-// Approximate coords from text locations (same lookup as other functions)
-const CITY_COORDS: Record<string, [number, number]> = {
-  "new york": [40.7128, -74.006], "nyc": [40.7128, -74.006],
-  "los angeles": [34.0522, -118.2437],
-  "chicago": [41.8781, -87.6298], "miami": [25.7617, -80.1918],
-  "san francisco": [37.7749, -122.4194],
-  "houston": [29.7604, -95.3698], "boston": [42.3601, -71.0589],
-  "seattle": [47.6062, -122.3321], "dallas": [32.7767, -96.797],
-  "downtown": [40.7128, -74.006], "uptown": [40.7831, -73.9712],
-  "airport": [40.758, -73.9855], "bay": [40.6892, -74.0445],
-  "east": [40.7282, -73.9442],
-};
-
-function parseTaggedCoords(loc: string): [number, number] | null {
-  const tagged = loc.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (tagged) {
-    const lat = parseFloat(tagged[1]);
-    const lon = parseFloat(tagged[2]);
-    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
-  }
-
-  const bare = loc.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (bare) {
-    const lat = parseFloat(bare[1]);
-    const lon = parseFloat(bare[2]);
-    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
-  }
-
-  return null;
-}
-
-async function getCoords(loc: string): Promise<[number, number]> {
-  if (!loc?.trim()) return [40.7128, -74.006];
-
-  const parsed = parseTaggedCoords(loc);
-  if (parsed) return parsed;
-
-  const lower = loc.toLowerCase();
-  for (const [k, v] of Object.entries(CITY_COORDS)) {
-    if (lower.includes(k)) return v;
-  }
-
-  try {
-    const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(loc)}`,
-      { headers: { "User-Agent": "Altos-ATM/1.0", "Accept-Language": "en" } }
-    );
-    const arr = await res.json();
-    if (Array.isArray(arr) && arr[0]?.lat && arr[0]?.lon) {
-      return [parseFloat(arr[0].lat), parseFloat(arr[0].lon)];
-    }
-  } catch (error) {
-    console.error("Trajectory predictor geocode failed:", error);
-  }
-
-  return [40.7128, -74.006];
-}
+// NOTE: the previous local city table had keyword hacks ("downtown",
+// "uptown", "airport", "bay", "east") that all resolved to NYC-area coords
+// regardless of the actual city in the input. They are intentionally NOT
+// carried into the shared geocode — unknown text now falls through to
+// Nominatim, which is correct. See docs/MODERNIZATION_STRATEGY.md §2.1.
 
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });

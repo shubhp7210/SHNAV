@@ -1,20 +1,9 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { CORS_HEADERS, EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
+import { haversineKm } from "../_shared/geo.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
-
-// Estimate flight time in minutes given typical eVTOL speed 90 km/h
-// Uses haversine to estimate distance-based time
-function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
+const corsHeaders = CORS_HEADERS;
 
 // Fuzzy match location name to vertiport
 function matchVertiport(location: string, vertiports: any[]): any | null {
@@ -84,7 +73,7 @@ serve(async (req) => {
     const distKm = originVP && destVP
       ? haversineKm(originVP.lat, originVP.lon, destVP.lat, destVP.lon)
       : 20;
-    const flightMinutes = Math.ceil((distKm / 90) * 60) + 5; // 5 min buffer
+    const flightMinutes = Math.ceil((distKm / EVTOL_BASE_SPEED_KMH) * 60) + 5; // 5 min buffer
     const estimatedArrival = new Date(depTime.getTime() + flightMinutes * 60 * 1000);
     const arrWindowStart = new Date(estimatedArrival.getTime() - 20 * 60 * 1000).toISOString();
     const arrWindowEnd = new Date(estimatedArrival.getTime() + 20 * 60 * 1000).toISOString();

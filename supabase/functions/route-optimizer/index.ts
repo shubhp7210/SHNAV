@@ -6,211 +6,27 @@
 // Scoring weights are pulled from route_score_config so the learning loop in
 // record-flight-outcome can adjust them based on prediction error.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { CORS_HEADERS, EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
+import { getCoords } from "../_shared/geocode.ts";
+import {
+  bearingDeg,
+  haversineKm as haversine,
+  type LatLon,
+  windRelativeToHeading,
+} from "../_shared/geo.ts";
+import {
+  icingFromWeather,
+  turbulenceFromGustCross,
+  weatherSeverity,
+  WxCache,
+} from "../_shared/weather.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
-
-// ──────────────────────────────────────────────────────────────────────────
-// Geocoding (unchanged — tagged coord pattern + Nominatim fallback)
-// ──────────────────────────────────────────────────────────────────────────
-const LOCATION_COORDS: Record<string, [number, number]> = {
-  "nyc": [40.7128, -74.006],
-  "new york": [40.7128, -74.006],
-  "manhattan": [40.776, -73.97],
-  "brooklyn": [40.678, -73.944],
-  "jfk": [40.641, -73.779],
-  "laguardia": [40.776, -73.872],
-  "newark": [40.69, -74.175],
-  "los angeles": [34.052, -118.243],
-  "lax": [33.942, -118.408],
-  "chicago": [41.883, -87.623],
-  "miami": [25.761, -80.191],
-  "seattle": [47.606, -122.332],
-  "boston": [42.361, -71.057],
-  "dallas": [32.776, -96.797],
-  "denver": [39.739, -104.99],
-  "san francisco": [37.774, -122.419],
-  "default": [40.7128, -74.006],
-};
-
-function parseTaggedCoords(location: string): [number, number] | null {
-  const tagged = location.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (tagged) {
-    const lat = parseFloat(tagged[1]);
-    const lon = parseFloat(tagged[2]);
-    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
-  }
-  const bare = location.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (bare) {
-    const lat = parseFloat(bare[1]);
-    const lon = parseFloat(bare[2]);
-    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
-  }
-  return null;
-}
-
-async function getCoords(location: string): Promise<[number, number]> {
-  if (!location?.trim()) return LOCATION_COORDS["default"];
-  const parsed = parseTaggedCoords(location);
-  if (parsed) return parsed;
-  const key = location.toLowerCase().trim();
-  for (const [known, coords] of Object.entries(LOCATION_COORDS)) {
-    if (known !== "default" && key.includes(known)) return coords;
-  }
-  try {
-    const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(location)}`,
-      { headers: { "User-Agent": "Altos-ATM/1.0", "Accept-Language": "en" } }
-    );
-    const arr = await res.json();
-    if (Array.isArray(arr) && arr[0]?.lat && arr[0]?.lon) {
-      return [parseFloat(arr[0].lat), parseFloat(arr[0].lon)];
-    }
-  } catch (error) {
-    console.error("Route optimizer geocode failed:", error);
-  }
-  return LOCATION_COORDS["default"];
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Geometry & meteo helpers
-// ──────────────────────────────────────────────────────────────────────────
+const corsHeaders = CORS_HEADERS;
 const KM_PER_DEG_LAT = 111.32;
-const EVTOL_BASE_SPEED_KMH = 90;
-
-function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-// Bearing from (lat1,lon1) to (lat2,lon2) in degrees [0, 360).
-function bearingDeg(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const toDeg = (r: number) => (r * 180) / Math.PI;
-  const φ1 = toRad(lat1);
-  const φ2 = toRad(lat2);
-  const Δλ = toRad(lon2 - lon1);
-  const y = Math.sin(Δλ) * Math.cos(φ2);
-  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
-  return (toDeg(Math.atan2(y, x)) + 360) % 360;
-}
-
-// Resolve wind components relative to the aircraft heading.
-// Returns headwind (kmh; negative = tailwind) and absolute crosswind (kmh).
-// `windFrom` is the meteorological "wind from" direction (where it blows from).
-function windRelativeToHeading(
-  headingDeg: number,
-  windFromDeg: number,
-  windSpeedKmh: number
-): { headwindKmh: number; crosswindKmh: number } {
-  // Convert "wind from" to "wind to" (vector direction the air is moving).
-  const windToDeg = (windFromDeg + 180) % 360;
-  // Angle between aircraft heading and wind vector. 0° = perfect tailwind.
-  const relDeg = ((windToDeg - headingDeg + 540) % 360) - 180; // [-180, 180]
-  const relRad = (relDeg * Math.PI) / 180;
-  const tailwindComponent = Math.cos(relRad) * windSpeedKmh; // + = tailwind
-  const crosswindComponent = Math.sin(relRad) * windSpeedKmh;
-  return {
-    headwindKmh: -tailwindComponent, // positive = slowing us down
-    crosswindKmh: Math.abs(crosswindComponent),
-  };
-}
-
-interface WeatherSample {
-  windSpeedKmh: number;
-  windFromDeg: number;
-  windGustsKmh: number;
-  precipitationMm: number;
-  temperatureC: number;
-  weatherCode: number;
-  visibilityM: number;
-}
-
-const NEUTRAL_WX: WeatherSample = {
-  windSpeedKmh: 5,
-  windFromDeg: 0,
-  windGustsKmh: 7,
-  precipitationMm: 0,
-  temperatureC: 18,
-  weatherCode: 0,
-  visibilityM: 10000,
-};
-
-async function fetchWeather(lat: number, lon: number): Promise<WeatherSample> {
-  try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,visibility,weather_code&wind_speed_unit=kmh&forecast_days=1`;
-    const res = await fetch(url);
-    if (!res.ok) return { ...NEUTRAL_WX };
-    const json = await res.json();
-    const c = json?.current ?? {};
-    return {
-      windSpeedKmh: Number.isFinite(c.wind_speed_10m) ? c.wind_speed_10m : 5,
-      windFromDeg: Number.isFinite(c.wind_direction_10m) ? c.wind_direction_10m : 0,
-      windGustsKmh: Number.isFinite(c.wind_gusts_10m) ? c.wind_gusts_10m : 7,
-      precipitationMm: Number.isFinite(c.precipitation) ? c.precipitation : 0,
-      temperatureC: Number.isFinite(c.temperature_2m) ? c.temperature_2m : 18,
-      weatherCode: Number.isFinite(c.weather_code) ? c.weather_code : 0,
-      visibilityM: Number.isFinite(c.visibility) ? c.visibility : 10000,
-    };
-  } catch {
-    return { ...NEUTRAL_WX };
-  }
-}
-
-// Per-leg weather severity (0 = perfect, 1 = unflyable). Combines wind, gusts,
-// precip, and weather-code into a single normalized cost.
-function weatherSeverity(wx: WeatherSample): number {
-  let s = 0;
-  if (wx.windSpeedKmh > 60) s += 0.5;
-  else if (wx.windSpeedKmh > 40) s += 0.3;
-  else if (wx.windSpeedKmh > 25) s += 0.15;
-  if (wx.windGustsKmh > 70) s += 0.4;
-  else if (wx.windGustsKmh > 45) s += 0.2;
-  else if (wx.windGustsKmh > 30) s += 0.1;
-  if (wx.precipitationMm > 5) s += 0.3;
-  else if (wx.precipitationMm > 1) s += 0.15;
-  else if (wx.precipitationMm > 0.2) s += 0.05;
-  if (wx.weatherCode >= 95) s += 0.6; // thunderstorm
-  else if (wx.weatherCode >= 71) s += 0.3; // snow
-  else if (wx.weatherCode >= 61) s += 0.15; // rain
-  else if (wx.weatherCode >= 51) s += 0.06; // drizzle
-  if (wx.visibilityM < 3000) s += 0.3;
-  else if (wx.visibilityM < 6000) s += 0.1;
-  return Math.min(1, s);
-}
-
-// Probability proxy for turbulence: built from gusts + crosswind.
-// Capped 0..1.
-function turbulenceFromGustCross(gustsKmh: number, crosswindKmh: number): number {
-  const g = Math.min(1, gustsKmh / 70);
-  const c = Math.min(1, crosswindKmh / 30);
-  return Math.min(1, g * 0.55 + c * 0.65);
-}
-
-// Probability proxy for icing conditions: cold + precipitation + cloud-coded.
-function icingFromWeather(wx: WeatherSample): number {
-  if (wx.temperatureC > 4) return 0;
-  let p = 0;
-  if (wx.temperatureC <= -2 && wx.precipitationMm > 0) p += 0.6;
-  else if (wx.temperatureC <= 2 && wx.precipitationMm > 0) p += 0.35;
-  if (wx.weatherCode >= 56 && wx.weatherCode <= 67) p += 0.2; // freezing rain codes
-  return Math.min(1, p);
-}
 
 // ──────────────────────────────────────────────────────────────────────────
 // Route geometry — produce a polyline with N evenly spaced waypoints
 // ──────────────────────────────────────────────────────────────────────────
-type LatLon = [number, number];
 
 function directRoute(o: LatLon, d: LatLon, n: number): LatLon[] {
   const pts: LatLon[] = [];
@@ -276,36 +92,6 @@ function samplePointsAlongRoute(pts: LatLon[], k: number): LatLon[] {
     ]);
   }
   return out;
-}
-
-interface WxCacheEntry {
-  wx: WeatherSample;
-  ts: number;
-}
-class WxCache {
-  private map = new Map<string, Promise<WeatherSample>>();
-  private resolved = new Map<string, WxCacheEntry>();
-  private readonly TTL_MS = 5 * 60 * 1000;
-
-  private key(lat: number, lon: number): string {
-    // ~5 km cells at mid latitudes.
-    return `${Math.round(lat * 20) / 20},${Math.round(lon * 20) / 20}`;
-  }
-
-  async get(lat: number, lon: number): Promise<WeatherSample> {
-    const k = this.key(lat, lon);
-    const cached = this.resolved.get(k);
-    if (cached && Date.now() - cached.ts < this.TTL_MS) return cached.wx;
-    const existing = this.map.get(k);
-    if (existing) return existing;
-    const p = fetchWeather(lat, lon).then((wx) => {
-      this.resolved.set(k, { wx, ts: Date.now() });
-      this.map.delete(k);
-      return wx;
-    });
-    this.map.set(k, p);
-    return p;
-  }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
