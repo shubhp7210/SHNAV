@@ -106,7 +106,7 @@ Deno.serve(async (req) => {
       .limit(1)
       .single();
 
-    let weightAdjustments: Record<string, number> = {};
+    let weightAdjustments: Record<string, number | string> = {};
 
     if (config && globalAvgSafety < 70) {
       const newSafety = Math.min(0.50, Number(config.weight_safety) + 0.02);
