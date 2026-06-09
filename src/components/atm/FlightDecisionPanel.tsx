@@ -1,14 +1,26 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { CheckCircle, Clock, RefreshCw, Shield, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
-import type { FlightDecisionResult } from "@/lib/atmTypes";
+import type { FlightDecisionResult, FlightDecision } from "@/lib/atmTypes";
+import type { LucideIcon } from "lucide-react";
 
 interface Props {
   decision: FlightDecisionResult;
   loading?: boolean;
 }
 
-const DECISION_CONFIG = {
+type DecisionConfig = {
+  icon: LucideIcon;
+  label: string;
+  bg: string;
+  border: string;
+  glow: string;
+  iconColor: string;
+  badgeBg: string;
+  ring: string;
+};
+
+const DECISION_CONFIG: Record<FlightDecision, DecisionConfig> = {
   GO: {
     icon: CheckCircle,
     label: "CLEARED TO GO",
@@ -56,7 +68,7 @@ export default function FlightDecisionPanel({ decision, loading }: Props) {
   const cfg = DECISION_CONFIG[decision.decision];
   const Icon = cfg.icon;
   const depTime = new Date(decision.departure_time);
-  const depStr = depTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const depStr = depTime.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
 
   return (
     <motion.div
