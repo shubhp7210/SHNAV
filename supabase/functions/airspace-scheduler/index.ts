@@ -1,12 +1,12 @@
 import { serve } from "https://deno.land/std@0.195.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { requireUserAuth } from "../_shared/auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-// Priority scores: emergency=100, tier1=80, tier2=60, standard=40
 function getPriority(aircraftType: string, isEmergency: boolean): number {
   if (isEmergency) return 100;
   if (aircraftType === "evtol") return 60;
@@ -18,9 +18,11 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
+    const user = await requireUserAuth(req);
+
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
     const {
@@ -35,11 +37,26 @@ serve(async (req) => {
       is_emergency = false,
     } = await req.json();
 
+    // If a flight_intent_id is supplied, verify it belongs to this user.
+    if (flight_intent_id) {
+      const { data: ownedIntent } = await supabase
+        .from("flight_intents")
+        .select("id")
+        .eq("id", flight_intent_id)
+        .eq("user_id", user.id)
+        .single();
+      if (!ownedIntent) {
+        return new Response(
+          JSON.stringify({ error: "Flight intent not found or access denied" }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+    }
+
     const priority = getPriority(aircraft_type, is_emergency);
     const windowStart = new Date(departure_window_start);
     const windowEnd = new Date(departure_window_end);
 
-    // Find matching airspace segment for this altitude band
     const { data: segments } = await supabase
       .from("airspace_segments")
       .select("*")
@@ -51,7 +68,7 @@ serve(async (req) => {
     const segmentId = segment?.id ?? null;
     const capacityPerHour = segment?.capacity_per_hour ?? 8;
 
-    // Count flights in overlapping windows at same altitude band
+    // Count fleet-wide flights in this window — needed for true capacity check.
     const hourAgo = new Date(windowStart.getTime() - 60 * 60 * 1000).toISOString();
     const hourAhead = new Date(windowEnd.getTime() + 60 * 60 * 1000).toISOString();
 
@@ -77,14 +94,12 @@ serve(async (req) => {
     let reason = "";
 
     if (!capacityAvailable && !is_emergency) {
-      // Segment at capacity — find next available 15-min slot
       delayMinutes = 15;
       allocated = false;
       const nextSlot = new Date(windowStart.getTime() + delayMinutes * 60 * 1000);
       allocatedTime = nextSlot.toISOString();
       reason = `Airspace segment at ${loadPct}% capacity. Next available slot in ${delayMinutes} minutes.`;
 
-      // Check if even delayed slot is clear
       const delayedEnd = new Date(nextSlot.getTime() + 15 * 60 * 1000).toISOString();
       const { data: delayedOverlap } = await supabase
         .from("flight_intents")
@@ -105,16 +120,14 @@ serve(async (req) => {
     } else if (is_emergency) {
       allocated = true;
       reason = "Emergency priority — immediate slot allocated.";
-      // For emergencies, preempt the lowest-priority flight if needed
     } else {
       allocated = true;
       reason = `Slot available. Current segment load: ${currentLoad}/${capacityPerHour} per hour (${loadPct}%).`;
     }
 
-    // Insert time slot record if we have a segment and flight intent
     if (segmentId && flight_intent_id) {
       const slotStart = new Date(allocatedTime);
-      const slotEnd = new Date(slotStart.getTime() + 30 * 60 * 1000); // 30 min slot
+      const slotEnd = new Date(slotStart.getTime() + 30 * 60 * 1000);
       await supabase.from("time_slots").insert({
         segment_id: segmentId,
         flight_intent_id,
@@ -140,6 +153,7 @@ serve(async (req) => {
       competing_flights: competingFlights.length,
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
+    if (err instanceof Response) return err;
     return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: corsHeaders });
   }
 });

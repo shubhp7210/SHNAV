@@ -1,21 +1,19 @@
 import { serve } from "std/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { CORS_HEADERS, EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
+import { requireUserAuth } from "../_shared/auth.ts";
 import { haversineKm } from "../_shared/geo.ts";
 
 const corsHeaders = CORS_HEADERS;
 
-// Fuzzy match location name to vertiport
 function matchVertiport(location: string, vertiports: any[]): any | null {
   const lower = location.toLowerCase();
-  // Exact / partial name match
   for (const vp of vertiports) {
     if (lower.includes(vp.name.toLowerCase()) || vp.name.toLowerCase().includes(lower.split(",")[0].trim())) {
       return vp;
     }
     if (vp.city && lower.includes(vp.city.toLowerCase())) return vp;
   }
-  // Fallback: nearest by city keyword
   if (lower.includes("downtown") || lower.includes("center") || lower.includes("central")) {
     return vertiports.find((v: any) => v.name.includes("Downtown")) ?? vertiports[0];
   }
@@ -33,9 +31,11 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
+    const user = await requireUserAuth(req);
+
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
     const {
@@ -46,19 +46,32 @@ serve(async (req) => {
       departure_time,
     } = await req.json();
 
+    // Verify flight ownership before assigning vertiport slots.
+    if (flight_intent_id) {
+      const { data: ownedIntent } = await supabase
+        .from("flight_intents")
+        .select("id")
+        .eq("id", flight_intent_id)
+        .eq("user_id", user.id)
+        .single();
+      if (!ownedIntent) {
+        return new Response(
+          JSON.stringify({ error: "Flight intent not found or access denied" }),
+          { status: 403, headers: corsHeaders },
+        );
+      }
+    }
+
     const depTime = new Date(departure_time ?? new Date().toISOString());
-    const windowHrs = 1;
     const windowStart = new Date(depTime.getTime() - 30 * 60 * 1000).toISOString();
     const windowEnd = new Date(depTime.getTime() + 30 * 60 * 1000).toISOString();
 
-    // Load all vertiports
     const { data: vertiports } = await supabase.from("vertiports").select("*").eq("is_active", true);
     const allVPs = vertiports ?? [];
 
     const originVP = matchVertiport(origin ?? "", allVPs);
     const destVP = matchVertiport(destination ?? "", allVPs);
 
-    // Count departures at origin in window
     const { data: originDeps } = await supabase
       .from("vertiport_slots")
       .select("id")
@@ -68,12 +81,10 @@ serve(async (req) => {
       .gte("scheduled_time", windowStart)
       .lte("scheduled_time", windowEnd);
 
-    // Count arrivals at destination in window
-    // Estimate arrival time based on distance
     const distKm = originVP && destVP
       ? haversineKm(originVP.lat, originVP.lon, destVP.lat, destVP.lon)
       : 20;
-    const flightMinutes = Math.ceil((distKm / EVTOL_BASE_SPEED_KMH) * 60) + 5; // 5 min buffer
+    const flightMinutes = Math.ceil((distKm / EVTOL_BASE_SPEED_KMH) * 60) + 5;
     const estimatedArrival = new Date(depTime.getTime() + flightMinutes * 60 * 1000);
     const arrWindowStart = new Date(estimatedArrival.getTime() - 20 * 60 * 1000).toISOString();
     const arrWindowEnd = new Date(estimatedArrival.getTime() + 20 * 60 * 1000).toISOString();
@@ -91,11 +102,9 @@ serve(async (req) => {
     const arrCount = (destArrivals ?? []).length;
     const maxDep = originVP?.max_departures_per_hour ?? 4;
     const maxArr = destVP?.max_arrivals_per_hour ?? 4;
-
     const depCapacityOk = depCount < maxDep;
     const arrCapacityOk = arrCount < maxArr;
 
-    // Calculate delay if constrained
     let departureDelay = 0;
     let adjustedDepartureTime = departure_time;
     let reason = "";
@@ -111,12 +120,11 @@ serve(async (req) => {
     } else if (!arrCapacityOk) {
       departureDelay = 10;
       adjustedDepartureTime = new Date(depTime.getTime() + 10 * 60 * 1000).toISOString();
-      reason = `Destination vertiport (${destVP?.name}) arrival slot constrained. Delay departure by ${departureDelay} min to spread arrivals.`;
+      reason = `Destination vertiport (${destVP?.name}) arrival slot constrained. Delay by ${departureDelay} min.`;
     } else {
       reason = "Both vertiports have available capacity.";
     }
 
-    // Insert vertiport slots if intent provided
     if (flight_intent_id && originVP && destVP) {
       await supabase.from("vertiport_slots").insert([
         {
@@ -166,6 +174,7 @@ serve(async (req) => {
       reason,
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
+    if (err instanceof Response) return err;
     return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: corsHeaders });
   }
 });

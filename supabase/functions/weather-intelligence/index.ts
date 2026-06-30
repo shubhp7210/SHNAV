@@ -1,6 +1,7 @@
 import { serve } from "std/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { CORS_HEADERS } from "../_shared/constants.ts";
+import { requireUserAuth } from "../_shared/auth.ts";
 import { getCoords } from "../_shared/geocode.ts";
 import {
   computeRisk,
@@ -10,15 +11,10 @@ import {
 
 const corsHeaders = CORS_HEADERS;
 
-// Micro-weather urban effects: amplify wind gusts near city centers
 function applyMicroWeather(lat: number, lon: number, windSpeed: number, gusts: number, temp: number) {
-  // Urban heat island: +2-4°C in city centers
-  const urbanHeatBias = 2.5;
-  // Wind channeling in urban canyons: gusts amplified 10-20%
-  const gustAmplification = 1.15;
   return {
-    adjusted_temp: temp + urbanHeatBias,
-    adjusted_gusts: gusts * gustAmplification,
+    adjusted_temp: temp + 2.5,
+    adjusted_gusts: gusts * 1.15,
     adjusted_wind: windSpeed * 1.05,
     micro_effects: ["Urban heat island effect (+2.5°C)", "Wind channeling in corridors (+15% gusts)"],
   };
@@ -28,11 +24,12 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
+    await requireUserAuth(req);
+
     const { origin, destination, altitude_band } = await req.json();
     const [oLat, oLon] = await getCoords(origin ?? "");
     const [dLat, dLon] = await getCoords(destination ?? "");
 
-    // Fetch current + hourly forecast from Open-Meteo for origin AND destination
     const params = "wind_speed_10m,wind_gusts_10m,precipitation,temperature_2m,weather_code,visibility";
     const hourlyParams = "wind_speed_10m,wind_gusts_10m,precipitation,weather_code,temperature_2m";
 
@@ -48,7 +45,6 @@ serve(async (req) => {
     const oc = originData?.current ?? {};
     const dc = destData?.current ?? {};
 
-    // Current conditions at origin
     const windSpeed = oc.wind_speed_10m ?? 5;
     const gusts = oc.wind_gusts_10m ?? 7;
     const precip = oc.precipitation ?? 0;
@@ -56,18 +52,12 @@ serve(async (req) => {
     const weatherCode = oc.weather_code ?? 0;
     const visibility = oc.visibility ?? 10000;
 
-    // Apply micro-weather corrections
     const micro = applyMicroWeather(oLat, oLon, windSpeed, gusts, temp);
-
-    // Current risk score
     const currentRiskScore = computeRisk(micro.adjusted_wind, micro.adjusted_gusts, precip, weatherCode);
     const currentRiskLevel = riskLevel(currentRiskScore);
-
-    // Altitude modifier: higher = more wind exposure
     const altitudeMultiplier = altitude_band === "high" ? 1.3 : altitude_band === "mid" ? 1.15 : 1.0;
     const altAdjustedRisk = Math.min(100, Math.round(currentRiskScore * altitudeMultiplier));
 
-    // Forecast: extract t+15min and t+30min from hourly (approximate with next 2 hours)
     const now = new Date();
     const currentHour = now.getHours();
     const oh = originData?.hourly ?? {};
@@ -81,15 +71,12 @@ serve(async (req) => {
       return computeRisk(fw * 1.05, fg * 1.15, fp, fc);
     }
 
-    const risk15 = getForecastRisk(0); // same hour, approximate
-    const risk30 = getForecastRisk(1); // next hour
-
-    // Uncertainty: increases with time horizon and current volatility
+    const risk15 = getForecastRisk(0);
+    const risk30 = getForecastRisk(1);
     const volatility = Math.abs(risk30 - currentRiskScore);
     const uncertainty15 = Math.min(25, 8 + volatility * 0.3);
     const uncertainty30 = Math.min(40, 15 + volatility * 0.5);
 
-    // Destination weather
     const dw = dc.wind_speed_10m ?? 5;
     const dg = dc.wind_gusts_10m ?? 7;
     const dp = dc.precipitation ?? 0;
@@ -97,21 +84,19 @@ serve(async (req) => {
     const destRiskScore = computeRisk(dw * 1.05, dg * 1.15, dp, dc_code);
     const destRiskLevel = riskLevel(destRiskScore);
 
-    // Decision recommendation
     let recommendation: "proceed" | "delay" | "reroute" = "proceed";
     let recommendationReason = "Conditions are suitable for flight.";
     let suggestedDelayMinutes = 0;
     let suggestedAltBand: string | null = null;
 
     if (altAdjustedRisk >= 60) {
-      // High risk — check if delaying helps
       if (risk30 < currentRiskScore - 15) {
         recommendation = "delay";
         suggestedDelayMinutes = 30;
         recommendationReason = `High weather risk now (${altAdjustedRisk}/100). Conditions improve in ~30 minutes.`;
       } else {
         recommendation = "reroute";
-        recommendationReason = `High weather risk (${altAdjustedRisk}/100). Suggest alternate altitude band or corridor to avoid weather.`;
+        recommendationReason = `High weather risk (${altAdjustedRisk}/100). Suggest alternate altitude band or corridor.`;
         suggestedAltBand = altitude_band === "high" ? "mid" : altitude_band === "mid" ? "low" : "mid";
       }
     } else if (altAdjustedRisk >= 35) {
@@ -158,6 +143,7 @@ serve(async (req) => {
       altitude_risk_modifier: altitudeMultiplier,
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
+    if (err instanceof Response) return err;
     return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: corsHeaders });
   }
 });

@@ -1,12 +1,10 @@
 // Route optimizer — generates multiple candidate routes, scores them on
 // time / wind / weather / turbulence / fuel / traffic / safety, and returns
-// the top 3. No route type is hardcoded; deviation directions are derived
-// from the great-circle bearing so the same logic works for any OD pair.
-//
-// Scoring weights are pulled from route_score_config so the learning loop in
-// record-flight-outcome can adjust them based on prediction error.
+// the top 3. Weights are pulled from route_score_config so the learning loop
+// can adjust them from actual outcomes.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { CORS_HEADERS, EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
+import { requireUserAuth } from "../_shared/auth.ts";
 import { getCoords } from "../_shared/geocode.ts";
 import {
   bearingDeg,
@@ -24,9 +22,7 @@ import {
 const corsHeaders = CORS_HEADERS;
 const KM_PER_DEG_LAT = 111.32;
 
-// ──────────────────────────────────────────────────────────────────────────
-// Route geometry — produce a polyline with N evenly spaced waypoints
-// ──────────────────────────────────────────────────────────────────────────
+// ── Route geometry ──────────────────────────────────────────────────────────
 
 function directRoute(o: LatLon, d: LatLon, n: number): LatLon[] {
   const pts: LatLon[] = [];
@@ -37,29 +33,22 @@ function directRoute(o: LatLon, d: LatLon, n: number): LatLon[] {
   return pts;
 }
 
-// Build a curved route offset perpendicular to the great-circle direction.
-// `offsetKm` is the maximum perpendicular displacement at the midpoint.
-// Positive offset = left of the direction of travel, negative = right.
 function deviationRoute(o: LatLon, d: LatLon, offsetKm: number, n = 24): LatLon[] {
   const [oLat, oLon] = o;
   const [dLat, dLon] = d;
   const bearing = bearingDeg(oLat, oLon, dLat, dLon);
-  // Perpendicular bearing (90° to the left of direction of travel).
   const perpBearing = (bearing - 90 + 360) % 360;
   const perpRad = (perpBearing * Math.PI) / 180;
   const dLatPerKm = 1 / KM_PER_DEG_LAT;
   const midLat = (oLat + dLat) / 2;
   const dLonPerKm = 1 / (KM_PER_DEG_LAT * Math.cos((midLat * Math.PI) / 180) || 1e-6);
-  // Convert (offset, perpBearing) into degrees of lat/lon at the midpoint.
   const perpLat = Math.cos(perpRad) * dLatPerKm;
   const perpLon = Math.sin(perpRad) * dLonPerKm;
-
   const pts: LatLon[] = [];
   for (let i = 0; i <= n; i++) {
     const t = i / n;
     const baseLat = oLat + (dLat - oLat) * t;
     const baseLon = oLon + (dLon - oLon) * t;
-    // sin(πt) gives a smooth curve peaking at t=0.5 and returning to 0 at endpoints.
     const bulge = Math.sin(Math.PI * t) * offsetKm;
     pts.push([baseLat + bulge * perpLat, baseLon + bulge * perpLon]);
   }
@@ -74,9 +63,6 @@ function routeDistance(pts: LatLon[]): number {
   return d;
 }
 
-// Sample weather at K evenly spaced points along the route. K kept small to
-// stay within Open-Meteo rate limits — we batch all candidates' samples through
-// a shared cache keyed by ~5km grid cells.
 function samplePointsAlongRoute(pts: LatLon[], k: number): LatLon[] {
   if (k <= 0 || pts.length < 2) return [];
   const out: LatLon[] = [];
@@ -86,49 +72,78 @@ function samplePointsAlongRoute(pts: LatLon[], k: number): LatLon[] {
     const lo = Math.floor(target);
     const hi = Math.min(pts.length - 1, lo + 1);
     const frac = target - lo;
-    out.push([
-      pts[lo][0] + (pts[hi][0] - pts[lo][0]) * frac,
-      pts[lo][1] + (pts[hi][1] - pts[lo][1]) * frac,
-    ]);
+    out.push([pts[lo][0] + (pts[hi][0] - pts[lo][0]) * frac, pts[lo][1] + (pts[hi][1] - pts[lo][1]) * frac]);
   }
   return out;
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Per-route evaluation — produces all the numbers we need to score it
-// ──────────────────────────────────────────────────────────────────────────
+// ── Airspace zone check ─────────────────────────────────────────────────────
+// Simple point-in-polygon (ray casting) for boundary_polygon JSONB arrays.
+
+interface PolyPoint { lat: number; lon: number }
+
+function pointInPolygon(lat: number, lon: number, polygon: PolyPoint[]): boolean {
+  let inside = false;
+  const n = polygon.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = polygon[i].lon, yi = polygon[i].lat;
+    const xj = polygon[j].lon, yj = polygon[j].lat;
+    const intersect = ((yi > lat) !== (yj > lat)) &&
+      (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function routeIntersectsNoFly(
+  waypoints: LatLon[],
+  noFlyZones: Array<{ name: string; boundary_polygon: PolyPoint[] }>,
+): string | null {
+  for (const zone of noFlyZones) {
+    if (!zone.boundary_polygon || zone.boundary_polygon.length < 3) continue;
+    const samplePts = samplePointsAlongRoute(waypoints, 12);
+    for (const [lat, lon] of samplePts) {
+      if (pointInPolygon(lat, lon, zone.boundary_polygon)) {
+        return zone.name;
+      }
+    }
+  }
+  return null;
+}
+
+// ── Per-route evaluation ────────────────────────────────────────────────────
+
 interface RouteEval {
   distanceKm: number;
-  timeMin: number;             // wind-adjusted flight time
-  baseTimeMin: number;         // distance / base speed (no wind)
+  timeMin: number;
+  baseTimeMin: number;
   avgHeadwindKmh: number;
   avgCrosswindKmh: number;
-  avgWxSeverity: number;       // [0..1]
-  maxWxSeverity: number;       // [0..1]
-  avgTurbulence: number;       // [0..1]
-  maxTurbulence: number;       // [0..1]
-  avgIcing: number;            // [0..1]
+  avgWxSeverity: number;
+  maxWxSeverity: number;
+  avgTurbulence: number;
+  maxTurbulence: number;
+  avgIcing: number;
   avgVisibilityM: number;
   worstWeatherCode: number;
-  trafficPenalty: number;      // unnormalized count-ish
+  trafficPenalty: number;
 }
 
 async function evaluateRoute(
   waypoints: LatLon[],
   wxCache: WxCache,
   conflictDensity: number,
-  sampleCount = 6
+  sampleCount = 6,
 ): Promise<RouteEval> {
   const distanceKm = routeDistance(waypoints);
   const samples = samplePointsAlongRoute(waypoints, sampleCount);
   const wxList = await Promise.all(samples.map((p) => wxCache.get(p[0], p[1])));
 
-  // Per-leg bearings to compute wind components on each leg.
   const bearings: number[] = [];
   for (let i = 1; i < waypoints.length; i++) {
     bearings.push(bearingDeg(waypoints[i - 1][0], waypoints[i - 1][1], waypoints[i][0], waypoints[i][1]));
   }
-  // Aggregate per-sample wind effect against the nearest leg.
+
   let sumHead = 0, sumCross = 0, sumWxSev = 0, maxWxSev = 0, sumTurb = 0, maxTurb = 0, sumIcing = 0, sumVis = 0, worstWxCode = 0;
   for (let i = 0; i < wxList.length; i++) {
     const wx = wxList[i];
@@ -149,150 +164,77 @@ async function evaluateRoute(
     if (wx.weatherCode > worstWxCode) worstWxCode = wx.weatherCode;
   }
   const n = Math.max(1, wxList.length);
-  const avgHead = sumHead / n;
-  const avgCross = sumCross / n;
-  const avgWxSev = sumWxSev / n;
-  const avgTurb = sumTurb / n;
-  const avgIcing = sumIcing / n;
-  const avgVis = sumVis / n;
-
-  // Effective ground speed = base airspeed minus headwind component (cap to floor).
-  const effectiveSpeed = Math.max(40, EVTOL_BASE_SPEED_KMH - avgHead);
+  const effectiveSpeed = Math.max(40, EVTOL_BASE_SPEED_KMH - sumHead / n);
   const timeMin = (distanceKm / effectiveSpeed) * 60;
   const baseTimeMin = (distanceKm / EVTOL_BASE_SPEED_KMH) * 60;
 
   return {
-    distanceKm,
-    timeMin,
-    baseTimeMin,
-    avgHeadwindKmh: avgHead,
-    avgCrosswindKmh: avgCross,
-    avgWxSeverity: avgWxSev,
+    distanceKm, timeMin, baseTimeMin,
+    avgHeadwindKmh: sumHead / n,
+    avgCrosswindKmh: sumCross / n,
+    avgWxSeverity: sumWxSev / n,
     maxWxSeverity: maxWxSev,
-    avgTurbulence: avgTurb,
+    avgTurbulence: sumTurb / n,
     maxTurbulence: maxTurb,
-    avgIcing: avgIcing,
-    avgVisibilityM: avgVis,
+    avgIcing: sumIcing / n,
+    avgVisibilityM: sumVis / n,
     worstWeatherCode: worstWxCode,
     trafficPenalty: conflictDensity,
   };
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Scoring — returns 0..100 for each axis plus the overall.
-// Weights come from route_score_config when present (learning loop tunes them).
-// ──────────────────────────────────────────────────────────────────────────
+// ── Scoring ─────────────────────────────────────────────────────────────────
+
 interface ScoreWeights {
-  weight_safety: number;
-  weight_weather: number;
-  weight_traffic: number;
-  weight_efficiency: number;
-  weight_time: number;
-  weight_fuel: number;
+  weight_safety: number; weight_weather: number; weight_traffic: number;
+  weight_efficiency: number; weight_time: number; weight_fuel: number;
 }
 
 const DEFAULT_WEIGHTS: ScoreWeights = {
-  weight_safety: 0.22,
-  weight_weather: 0.18,
-  weight_traffic: 0.15,
-  weight_efficiency: 0.15,
-  weight_time: 0.20,
-  weight_fuel: 0.10,
+  weight_safety: 0.22, weight_weather: 0.18, weight_traffic: 0.15,
+  weight_efficiency: 0.15, weight_time: 0.20, weight_fuel: 0.10,
 };
 
-function scoreEval(
-  ev: RouteEval,
-  fastestTimeMin: number,
-  shortestDistKm: number,
-  weights: ScoreWeights
-): {
-  overall: number;
-  time: number;
-  wind: number;
-  weather: number;
-  turbulence: number;
-  fuel: number;
-  traffic: number;
-  safety: number;
-  efficiency: number;
-} {
-  // Time: 100 if this is the fastest, drops as the route takes longer.
+function scoreEval(ev: RouteEval, fastestTimeMin: number, shortestDistKm: number, weights: ScoreWeights) {
   const timeDelta = Math.max(0, ev.timeMin - fastestTimeMin);
   const timeScore = Math.max(10, 100 - (timeDelta / Math.max(1, fastestTimeMin)) * 120);
-  // Wind: tailwind boosts the score, headwind drags it down (≤ 35 kmh swing).
   const windScore = Math.max(10, Math.min(100, 60 - ev.avgHeadwindKmh * 1.2 - ev.avgCrosswindKmh * 0.5 + 40));
-  // Weather: average severity drives the cost, with max severity adding a tail penalty.
   const wxScore = Math.max(10, 100 - ev.avgWxSeverity * 80 - ev.maxWxSeverity * 20);
-  // Turbulence:
   const turbScore = Math.max(10, 100 - ev.avgTurbulence * 70 - ev.maxTurbulence * 30);
-  // Fuel: longer distance + persistent headwind = more energy. eVTOL energy is
-  // dominated by hover/cruise time; we proxy with adjusted time.
   const fuelRatio = ev.timeMin / Math.max(1, ev.baseTimeMin);
   const fuelScore = Math.max(10, 100 - (fuelRatio - 1) * 180);
-  // Traffic: density-driven, capped at 0..5.
   const trafScore = Math.max(10, 100 - Math.min(5, ev.trafficPenalty) * 16);
-  // Efficiency: distance vs shortest, plus icing penalty (icing forces deviations).
   const distRatio = ev.distanceKm / Math.max(0.01, shortestDistKm);
   const effScore = Math.max(10, 100 - (distRatio - 1) * 140 - ev.avgIcing * 30);
-  // Safety: combination of weather extremes + turbulence + icing + low visibility.
   const visPenalty = ev.avgVisibilityM < 5000 ? (5000 - ev.avgVisibilityM) / 50 : 0;
-  const safetyScore = Math.max(
-    10,
-    100 - ev.maxWxSeverity * 35 - ev.maxTurbulence * 25 - ev.avgIcing * 25 - visPenalty
-  );
-
+  const safetyScore = Math.max(10, 100 - ev.maxWxSeverity * 35 - ev.maxTurbulence * 25 - ev.avgIcing * 25 - visPenalty);
   const w = weights;
   const overall =
-    safetyScore * w.weight_safety +
-    wxScore * w.weight_weather +
-    trafScore * w.weight_traffic +
-    effScore * w.weight_efficiency +
-    timeScore * w.weight_time +
-    fuelScore * w.weight_fuel;
-
+    safetyScore * w.weight_safety + wxScore * w.weight_weather + trafScore * w.weight_traffic +
+    effScore * w.weight_efficiency + timeScore * w.weight_time + fuelScore * w.weight_fuel;
   const round = (n: number) => Math.round(n);
-  return {
-    overall: round(overall),
-    time: round(timeScore),
-    wind: round(windScore),
-    weather: round(wxScore),
-    turbulence: round(turbScore),
-    fuel: round(fuelScore),
-    traffic: round(trafScore),
-    safety: round(safetyScore),
-    efficiency: round(effScore),
-  };
+  return { overall: round(overall), time: round(timeScore), wind: round(windScore), weather: round(wxScore), turbulence: round(turbScore), fuel: round(fuelScore), traffic: round(trafScore), safety: round(safetyScore), efficiency: round(effScore) };
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Candidate generation
-// ──────────────────────────────────────────────────────────────────────────
-interface Candidate {
-  id: string;
-  label: string;
-  waypoints: LatLon[];
-}
+// ── Candidate generation ────────────────────────────────────────────────────
+
+interface Candidate { id: string; label: string; waypoints: LatLon[] }
 
 function buildCandidates(o: LatLon, d: LatLon): Candidate[] {
   const distKm = haversine(o[0], o[1], d[0], d[1]);
-  // Deviation magnitudes scale with distance so short hops don't bulge wildly.
   const small = Math.max(2, distKm * 0.06);
   const large = Math.max(5, distKm * 0.15);
-  // Sign convention here matches deviationRoute: + = left of travel (port),
-  // - = right of travel (starboard). We give them neutral labels.
   return [
-    { id: "direct",           label: "Direct route",           waypoints: directRoute(o, d, 24) },
-    { id: "port-shallow",     label: "Port deviation (small)", waypoints: deviationRoute(o, d, +small) },
-    { id: "starboard-shallow",label: "Starboard deviation (small)", waypoints: deviationRoute(o, d, -small) },
-    { id: "port-wide",        label: "Port deviation (wide)",  waypoints: deviationRoute(o, d, +large) },
-    { id: "starboard-wide",   label: "Starboard deviation (wide)", waypoints: deviationRoute(o, d, -large) },
+    { id: "direct",            label: "Direct route",                waypoints: directRoute(o, d, 24) },
+    { id: "port-shallow",      label: "Port deviation (small)",      waypoints: deviationRoute(o, d, +small) },
+    { id: "starboard-shallow", label: "Starboard deviation (small)", waypoints: deviationRoute(o, d, -small) },
+    { id: "port-wide",         label: "Port deviation (wide)",       waypoints: deviationRoute(o, d, +large) },
+    { id: "starboard-wide",    label: "Starboard deviation (wide)",  waypoints: deviationRoute(o, d, -large) },
   ];
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Traffic conflict detection (kept simple: how many active intents intersect
-// near this route's origin or destination during overlapping time windows?)
-// ──────────────────────────────────────────────────────────────────────────
+// ── Traffic conflict detection ───────────────────────────────────────────────
+
 function timeToMinutes(t: string): number {
   const [h, m] = (t ?? "00:00").split(":").map(Number);
   return (h || 0) * 60 + (m || 0);
@@ -301,15 +243,32 @@ function windowsOverlap(s1: string, e1: string, s2: string, e2: string): boolean
   return timeToMinutes(s1) < timeToMinutes(e2) && timeToMinutes(s2) < timeToMinutes(e1);
 }
 
-interface ConflictEntry {
-  aircraft_id: string;
-  conflict_type: string;
-  severity: "high" | "moderate" | "low";
+interface ConflictEntry { aircraft_id: string; conflict_type: string; severity: "high" | "moderate" | "low" }
+
+// ── Wind drift analysis ──────────────────────────────────────────────────────
+
+function computeWindDrift(ev: RouteEval) {
+  const durationS = ev.timeMin * 60;
+  // Lateral drift from crosswind over the flight duration, in metres.
+  const lateralDriftM = Math.round(ev.avgCrosswindKmh * (1000 / 3600) * durationS);
+  // Time penalty vs no-wind baseline (positive = slower than no-wind).
+  const timePenaltyMin = Math.round((ev.timeMin - ev.baseTimeMin) * 10) / 10;
+  // Recommended correction: cross-track angle in degrees.
+  const correctionDeg = Math.round(
+    Math.atan2(ev.avgCrosswindKmh, EVTOL_BASE_SPEED_KMH) * (180 / Math.PI) * 10,
+  ) / 10;
+  return {
+    avg_headwind_kmh: Math.round(ev.avgHeadwindKmh),
+    avg_crosswind_kmh: Math.round(ev.avgCrosswindKmh),
+    time_penalty_minutes: timePenaltyMin,
+    max_lateral_drift_m: lateralDriftM,
+    recommended_heading_correction_deg: correctionDeg,
+    wind_effect: ev.avgHeadwindKmh > 5 ? "headwind" : ev.avgHeadwindKmh < -5 ? "tailwind" : "crosswind",
+  };
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Main handler
-// ──────────────────────────────────────────────────────────────────────────
+// ── Main handler ─────────────────────────────────────────────────────────────
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -320,35 +279,41 @@ Deno.serve(async (req) => {
     });
 
   try {
+    const user = await requireUserAuth(req);
+
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
     const body = await req.json().catch(() => ({}));
-    const {
-      aircraft_id,
-      operator_name,
-      origin,
-      destination,
-      altitude_band,
-      departure_window_start,
-      departure_window_end,
-      flight_intent_id,
-    } = body;
+    const { aircraft_id, operator_name, origin, destination, altitude_band, departure_window_start, departure_window_end, flight_intent_id } = body;
 
     if (!origin || !destination) {
       return json({ error: "origin and destination are required" }, 400);
     }
 
+    // Ownership check when flight_intent_id is provided.
+    if (flight_intent_id) {
+      const { data: ownedIntent } = await supabase
+        .from("flight_intents")
+        .select("id")
+        .eq("id", flight_intent_id)
+        .eq("user_id", user.id)
+        .single();
+      if (!ownedIntent) {
+        return json({ error: "Flight intent not found or access denied" }, 403);
+      }
+    }
+
     const originCoords = await getCoords(origin);
     const destCoords = await getCoords(destination);
-    console.info("[route-optimizer] resolved coords", { originCoords, destCoords });
+    console.info("[route-optimizer] resolved coords", { originCoords, destCoords, user_id: user.id });
 
-    // ── 1. Generate candidates ─────────────────────────────────────────
+    // ── 1. Generate candidates ──────────────────────────────────────────
     const candidates = buildCandidates(originCoords, destCoords);
 
-    // ── 2. Traffic conflict detection ──────────────────────────────────
+    // ── 2. Traffic conflict detection (fleet-wide — needed for safety) ──
     const { data: existingIntents } = await supabase
       .from("flight_intents")
       .select("aircraft_id, origin, destination, altitude_band, departure_window_start, departure_window_end, status, id")
@@ -360,41 +325,32 @@ Deno.serve(async (req) => {
     const conflicts: ConflictEntry[] = [];
     let conflictDensity = 0;
     for (const intent of existingIntents ?? []) {
-      if (
-        !windowsOverlap(
-          departure_window_start ?? "00:00",
-          departure_window_end ?? "23:59",
-          intent.departure_window_start,
-          intent.departure_window_end
-        )
-      ) continue;
+      if (!windowsOverlap(departure_window_start ?? "00:00", departure_window_end ?? "23:59", intent.departure_window_start, intent.departure_window_end)) continue;
       const iOrigin = await getCoords(intent.origin);
       const iDest = await getCoords(intent.destination);
       const nearOrigin = haversine(originCoords[0], originCoords[1], iOrigin[0], iOrigin[1]) < 20;
       const nearDest = haversine(destCoords[0], destCoords[1], iDest[0], iDest[1]) < 20;
       if (!nearOrigin && !nearDest) continue;
-      const severity: ConflictEntry["severity"] =
-        nearOrigin && nearDest ? "high" : "moderate";
-      conflicts.push({
-        aircraft_id: intent.aircraft_id,
-        conflict_type:
-          severity === "high"
-            ? "Overlapping departure window with shared origin & destination"
-            : "Overlapping departure window with nearby origin or destination",
-        severity,
-      });
+      const severity: ConflictEntry["severity"] = nearOrigin && nearDest ? "high" : "moderate";
+      conflicts.push({ aircraft_id: intent.aircraft_id, conflict_type: severity === "high" ? "Overlapping departure window with shared origin & destination" : "Overlapping departure window with nearby origin or destination", severity });
       conflictDensity += severity === "high" ? 0.6 : 0.3;
     }
 
-    // ── 3. Evaluate every candidate (parallel weather sampling via cache) ─
+    // ── 3. Load active no-fly zones for spatial filtering ───────────────
+    const { data: noFlySegments } = await supabase
+      .from("airspace_segments")
+      .select("name, boundary_polygon")
+      .eq("is_no_fly", true)
+      .not("boundary_polygon", "is", null);
+    const noFlyZones = (noFlySegments ?? []).filter(s => s.boundary_polygon);
+
+    // ── 4. Evaluate candidates ──────────────────────────────────────────
     const wxCache = new WxCache();
-    const evals = await Promise.all(
-      candidates.map((c) => evaluateRoute(c.waypoints, wxCache, conflictDensity))
-    );
+    const evals = await Promise.all(candidates.map((c) => evaluateRoute(c.waypoints, wxCache, conflictDensity)));
     const fastestTime = Math.min(...evals.map((e) => e.timeMin));
     const shortestDist = Math.min(...evals.map((e) => e.distanceKm));
 
-    // ── 4. Load scoring weights (learning loop tunes these) ─────────────
+    // ── 5. Load scoring weights ─────────────────────────────────────────
     let weights: ScoreWeights = { ...DEFAULT_WEIGHTS };
     const { data: cfg } = await supabase
       .from("route_score_config")
@@ -403,58 +359,70 @@ Deno.serve(async (req) => {
       .limit(1)
       .single();
     if (cfg) {
-      // Read fields tolerantly so older configs missing time/fuel still work.
       weights = {
-        weight_safety:     Number(cfg.weight_safety ?? DEFAULT_WEIGHTS.weight_safety),
-        weight_weather:    Number(cfg.weight_weather ?? DEFAULT_WEIGHTS.weight_weather),
-        weight_traffic:    Number(cfg.weight_traffic ?? DEFAULT_WEIGHTS.weight_traffic),
+        weight_safety: Number(cfg.weight_safety ?? DEFAULT_WEIGHTS.weight_safety),
+        weight_weather: Number(cfg.weight_weather ?? DEFAULT_WEIGHTS.weight_weather),
+        weight_traffic: Number(cfg.weight_traffic ?? DEFAULT_WEIGHTS.weight_traffic),
         weight_efficiency: Number(cfg.weight_efficiency ?? DEFAULT_WEIGHTS.weight_efficiency),
-        weight_time:       Number(cfg.weight_time ?? DEFAULT_WEIGHTS.weight_time),
-        weight_fuel:       Number(cfg.weight_fuel ?? DEFAULT_WEIGHTS.weight_fuel),
+        weight_time: Number(cfg.weight_time ?? DEFAULT_WEIGHTS.weight_time),
+        weight_fuel: Number(cfg.weight_fuel ?? DEFAULT_WEIGHTS.weight_fuel),
       };
     }
 
-    // ── 5. Historical bias from completed flights on this OD pair ───────
+    // ── 6. Historical bias — user-specific first, fleet fallback ────────
     const originKey = origin.toLowerCase().split("@")[0].trim();
     const destKey = destination.toLowerCase().split("@")[0].trim();
-    const { data: pattern } = await supabase
-      .from("route_patterns")
-      .select("*")
-      .eq("origin_key", originKey)
-      .eq("destination_key", destKey)
-      .maybeSingle();
 
-    // ── 6. Score every candidate, then sort and pick the top 3 ──────────
+    let pattern = null;
+    const { data: userPattern } = await supabase
+      .from("route_patterns").select("*")
+      .eq("origin_key", originKey).eq("destination_key", destKey).eq("user_id", user.id)
+      .maybeSingle();
+    pattern = userPattern;
+
+    if (!pattern) {
+      const { data: fleetPattern } = await supabase
+        .from("route_patterns").select("*")
+        .eq("origin_key", originKey).eq("destination_key", destKey).is("user_id", null)
+        .maybeSingle();
+      pattern = fleetPattern;
+    }
+
+    // ── 7. Score, apply no-fly penalty, apply historical drift ──────────
     const scored = candidates.map((c, i) => {
       const score = scoreEval(evals[i], fastestTime, shortestDist, weights);
       let overall = score.overall;
-      // Historical adjustment: if completed flights on this OD pair show a
-      // consistent under- or over-performance vs the predicted average score,
-      // shift this candidate's overall by a portion of that drift. This is
-      // where the system "learns" from actual outcomes.
+
+      // Heavy penalty for routes passing through active no-fly zones.
+      const violatedZone = noFlyZones.length > 0 ? routeIntersectsNoFly(c.waypoints, noFlyZones) : null;
+      if (violatedZone) overall = Math.max(0, overall - 50);
+
+      // Historical drift adjustment (user-specific or fleet).
       if (pattern && (pattern.completed_flight_count ?? 0) >= 2) {
         const predicted = Number(pattern.avg_overall_score ?? 70);
         const adjusted = Number(pattern.outcome_adjusted_score ?? predicted);
         const drift = adjusted - predicted;
         overall = Math.max(10, Math.min(100, overall + drift * 0.3));
       }
-      const distanceKm = Math.round(evals[i].distanceKm * 10) / 10;
+
       return {
         candidate: c,
         evaluation: evals[i],
         score: { ...score, overall: Math.round(overall) },
-        distance_km: distanceKm,
+        distance_km: Math.round(evals[i].distanceKm * 10) / 10,
         estimated_time_min: Math.round(evals[i].timeMin * 10) / 10,
+        violated_no_fly_zone: violatedZone,
+        wind_drift: computeWindDrift(evals[i]),
       };
     });
 
     scored.sort((a, b) => b.score.overall - a.score.overall);
     const top3 = scored.slice(0, 3);
 
-    // Build presentational route objects.
     const buildOperationalNote = (s: typeof top3[number]): string => {
       const e = s.evaluation;
       const bits: string[] = [];
+      if (s.violated_no_fly_zone) bits.push(`⚠ Passes through restricted zone: ${s.violated_no_fly_zone}`);
       if (e.avgHeadwindKmh > 8) bits.push(`headwind ~${Math.round(e.avgHeadwindKmh)} km/h`);
       else if (e.avgHeadwindKmh < -8) bits.push(`tailwind ~${Math.round(-e.avgHeadwindKmh)} km/h`);
       if (e.avgCrosswindKmh > 15) bits.push(`crosswind ~${Math.round(e.avgCrosswindKmh)} km/h`);
@@ -481,6 +449,8 @@ Deno.serve(async (req) => {
       wind_score: s.score.wind,
       turbulence_score: s.score.turbulence,
       fuel_score: s.score.fuel,
+      wind_drift: s.wind_drift,
+      violated_no_fly_zone: s.violated_no_fly_zone,
       wind_summary: {
         avg_headwind_kmh: Math.round(s.evaluation.avgHeadwindKmh),
         avg_crosswind_kmh: Math.round(s.evaluation.avgCrosswindKmh),
@@ -495,11 +465,10 @@ Deno.serve(async (req) => {
       is_selected: false,
     }));
 
-    // For backwards compatibility the API still has `primary_route` / `alternate_routes`.
     const primaryRoute = { ...routes[0], is_selected: true };
     const alternateRoutes = routes.slice(1);
 
-    // ── 7. Persist this evaluation for the learning loop ────────────────
+    // ── 8. Persist route with user_id ───────────────────────────────────
     const weatherConditions = await wxCache.get(originCoords[0], originCoords[1]);
     const overallWxSeverity = top3[0]?.evaluation.avgWxSeverity ?? 0;
     const weatherRisk: "low" | "moderate" | "high" =
@@ -538,61 +507,57 @@ Deno.serve(async (req) => {
       .select("id")
       .single();
 
-    // ── 8. Upsert route_patterns so the next call has running averages ──
-    if (pattern) {
-      const n = pattern.flight_count + 1;
+    // ── 9. Upsert both user-specific and fleet route_patterns ────────────
+    const patternUpsert = async (uid: string | null, existing: any) => {
+      const n = (existing?.flight_count ?? 0) + 1;
       const blend = (oldVal: number | null, fresh: number) =>
-        ((Number(oldVal ?? fresh) * pattern.flight_count) + fresh) / n;
-      await supabase
-        .from("route_patterns")
-        .update({
-          flight_count: n,
-          avg_overall_score: blend(pattern.avg_overall_score, primaryRoute.overall_score),
-          avg_safety_score: blend(pattern.avg_safety_score, primaryRoute.safety_score),
-          avg_weather_score: blend(pattern.avg_weather_score, primaryRoute.weather_score),
-          avg_traffic_score: blend(pattern.avg_traffic_score, primaryRoute.traffic_score),
-          avg_efficiency_score: blend(pattern.avg_efficiency_score, primaryRoute.efficiency_score),
-          preferred_waypoints: primaryRoute.waypoints,
-          last_updated: new Date().toISOString(),
-        })
-        .eq("id", pattern.id);
-    } else {
-      await supabase.from("route_patterns").insert({
+        ((Number(oldVal ?? fresh) * (existing?.flight_count ?? 0)) + fresh) / n;
+      const data = {
         origin_key: originKey,
         destination_key: destKey,
         altitude_band,
-        flight_count: 1,
-        avg_overall_score: primaryRoute.overall_score,
-        avg_safety_score: primaryRoute.safety_score,
-        avg_weather_score: primaryRoute.weather_score,
-        avg_traffic_score: primaryRoute.traffic_score,
-        avg_efficiency_score: primaryRoute.efficiency_score,
+        user_id: uid,
+        flight_count: n,
+        avg_overall_score: blend(existing?.avg_overall_score, primaryRoute.overall_score),
+        avg_safety_score: blend(existing?.avg_safety_score, primaryRoute.safety_score),
+        avg_weather_score: blend(existing?.avg_weather_score, primaryRoute.weather_score),
+        avg_traffic_score: blend(existing?.avg_traffic_score, primaryRoute.traffic_score),
+        avg_efficiency_score: blend(existing?.avg_efficiency_score, primaryRoute.efficiency_score),
         preferred_waypoints: primaryRoute.waypoints,
         last_updated: new Date().toISOString(),
-      });
-    }
+      };
+      if (existing) {
+        await supabase.from("route_patterns").update(data).eq("id", existing.id);
+      } else {
+        await supabase.from("route_patterns").insert({ ...data, flight_count: 1 });
+      }
+    };
+
+    await patternUpsert(user.id, userPattern ?? null);
+
+    const { data: fleetPattern } = await supabase
+      .from("route_patterns").select("*")
+      .eq("origin_key", originKey).eq("destination_key", destKey).is("user_id", null)
+      .maybeSingle();
+    await patternUpsert(null, fleetPattern ?? null);
 
     const historicalSuggestion = pattern && pattern.flight_count >= 2
       ? {
           found: true,
+          is_user_specific: pattern.user_id != null,
           flight_count: pattern.flight_count,
           completed_flight_count: pattern.completed_flight_count ?? 0,
           avg_score: Math.round(Number(pattern.avg_overall_score ?? 0)),
-          outcome_adjusted_score: pattern.outcome_adjusted_score
-            ? Math.round(Number(pattern.outcome_adjusted_score))
-            : null,
-          message:
-            (pattern.completed_flight_count ?? 0) >= 2
-              ? `Flown ${pattern.flight_count} times · ${pattern.completed_flight_count} completed. Outcome-adjusted: ${Math.round(Number(pattern.outcome_adjusted_score ?? pattern.avg_overall_score))}.`
-              : `Flown ${pattern.flight_count} times. Avg planning score: ${Math.round(Number(pattern.avg_overall_score ?? 0))}.`,
+          outcome_adjusted_score: pattern.outcome_adjusted_score ? Math.round(Number(pattern.outcome_adjusted_score)) : null,
+          message: (pattern.completed_flight_count ?? 0) >= 2
+            ? `Flown ${pattern.flight_count} times · ${pattern.completed_flight_count} completed. Outcome-adjusted: ${Math.round(Number(pattern.outcome_adjusted_score ?? pattern.avg_overall_score))}.`
+            : `Flown ${pattern.flight_count} times. Avg planning score: ${Math.round(Number(pattern.avg_overall_score ?? 0))}.`,
         }
       : { found: false };
 
     return json({
       route_id: savedRoute?.id ?? crypto.randomUUID(),
-      // Top-3 list (new clients should prefer this).
       top_routes: routes,
-      // Back-compat for current clients.
       primary_route: primaryRoute,
       alternate_routes: alternateRoutes,
       conflict_details: conflicts,
@@ -611,11 +576,13 @@ Deno.serve(async (req) => {
         total_conflicts: conflicts.length,
         routes_evaluated: candidates.length,
         routes_returned: routes.length,
-        optimization_method: "Dynamic candidate generation with multi-axis scoring (time / wind / weather / turbulence / fuel / traffic / safety)",
+        no_fly_zones_checked: noFlyZones.length,
+        optimization_method: "Dynamic candidate generation with multi-axis scoring (time / wind / weather / turbulence / fuel / traffic / safety / airspace)",
         scoring_weights: weights,
       },
     });
   } catch (error: unknown) {
+    if (error instanceof Response) return error;
     const message = error instanceof Error ? error.message : String(error);
     console.error("Route optimizer error:", message);
     return new Response(JSON.stringify({ error: message }), {

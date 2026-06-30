@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { requireInternalSecret } from "../_shared/auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -12,11 +13,15 @@ Deno.serve(async (req) => {
   }
 
   try {
+    // System-only function — requires the internal secret, not a user JWT.
+    // Set INTERNAL_FUNCTION_SECRET in Supabase project env vars / Vault.
+    requireInternalSecret(req);
+
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // ── 1. Query all routes from the past 30 days ──
+    // Query all active routes from the past 30 days (fleet-wide aggregate).
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     const { data: routes, error: routesError } = await supabase
       .from("routes")
@@ -30,7 +35,6 @@ Deno.serve(async (req) => {
     let processedRoutes = routeList.length;
     let updatedPatterns = 0;
 
-    // ── 2. Group by OD + altitude band ──
     interface RouteGroup {
       overall: number[];
       safety: number[];
@@ -51,7 +55,6 @@ Deno.serve(async (req) => {
       if (route.weather_score != null) groups[key].weather.push(Number(route.weather_score));
       if (route.traffic_score != null) groups[key].traffic.push(Number(route.traffic_score));
       if (route.efficiency_score != null) groups[key].efficiency.push(Number(route.efficiency_score));
-      // Keep last waypoints as preferred
       if (route.primary_route) {
         const pr = route.primary_route as { waypoints?: unknown };
         if (pr.waypoints) groups[key].waypoints = pr.waypoints;
@@ -60,7 +63,7 @@ Deno.serve(async (req) => {
 
     const avg = (arr: number[]) => arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 
-    // ── 3. Upsert route_patterns ──
+    // Upsert fleet-wide route_patterns (user_id IS NULL).
     for (const [key, group] of Object.entries(groups)) {
       const [originKey, destKey, altBand] = key.split("|");
       const count = group.overall.length;
@@ -71,12 +74,14 @@ Deno.serve(async (req) => {
         .eq("origin_key", originKey)
         .eq("destination_key", destKey)
         .eq("altitude_band", altBand)
+        .is("user_id", null)
         .single();
 
       const upsertData = {
         origin_key: originKey,
         destination_key: destKey,
         altitude_band: altBand,
+        user_id: null,
         flight_count: count,
         avg_overall_score: avg(group.overall),
         avg_safety_score: avg(group.safety),
@@ -95,7 +100,7 @@ Deno.serve(async (req) => {
       updatedPatterns++;
     }
 
-    // ── 4. Adaptive weight adjustment ──
+    // Adaptive weight adjustment based on fleet-wide safety scores.
     const allSafetyScores = routeList.map((r) => Number(r.safety_score ?? 0));
     const globalAvgSafety = allSafetyScores.length > 0 ? avg(allSafetyScores) : 100;
 
@@ -111,16 +116,10 @@ Deno.serve(async (req) => {
     if (config && globalAvgSafety < 70) {
       const newSafety = Math.min(0.50, Number(config.weight_safety) + 0.02);
       const newEfficiency = Math.max(0.05, Number(config.weight_efficiency) - 0.02);
-
       await supabase
         .from("route_score_config")
-        .update({
-          weight_safety: newSafety,
-          weight_efficiency: newEfficiency,
-          updated_at: new Date().toISOString(),
-        })
+        .update({ weight_safety: newSafety, weight_efficiency: newEfficiency, updated_at: new Date().toISOString() })
         .eq("id", config.id);
-
       weightAdjustments = {
         weight_safety: newSafety,
         weight_efficiency: newEfficiency,
@@ -136,14 +135,15 @@ Deno.serve(async (req) => {
         weight_adjustments: weightAdjustments,
         timestamp: new Date().toISOString(),
       }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (error: unknown) {
+    if (error instanceof Response) return error;
     const message = error instanceof Error ? error.message : String(error);
     console.error("Background analyzer error:", message);
     return new Response(
       JSON.stringify({ error: message }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
 });

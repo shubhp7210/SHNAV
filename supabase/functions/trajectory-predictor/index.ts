@@ -5,40 +5,37 @@ import {
   EVTOL_BASE_SPEED_KMH as EVTOL_SPEED_KMH,
   MIN_SEPARATION_KM,
 } from "../_shared/constants.ts";
+import { requireUserAuth } from "../_shared/auth.ts";
 import { getCoords } from "../_shared/geocode.ts";
 import { haversineKm, interpolatePosition } from "../_shared/geo.ts";
 
 const corsHeaders = CORS_HEADERS;
 
-// NOTE: the previous local city table had keyword hacks ("downtown",
-// "uptown", "airport", "bay", "east") that all resolved to NYC-area coords
-// regardless of the actual city in the input. They are intentionally NOT
-// carried into the shared geocode — unknown text now falls through to
-// Nominatim, which is correct. See docs/MODERNIZATION_STRATEGY.md §2.1.
-
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
+    const user = await requireUserAuth(req);
+
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
     const { flight_intent_id } = await req.json();
-    console.info("[trajectory-predictor] received request", { flight_intent_id });
+    console.info("[trajectory-predictor] received request", { flight_intent_id, user_id: user.id });
 
-    // Fetch all active/pending flights
+    // Fetch only this user's active flights — never expose other operators' data.
     const { data: activeFlights } = await supabase
       .from("flight_intents")
       .select("id, aircraft_id, origin, destination, altitude_band, departure_window_start, departure_window_end, status")
       .in("status", ["active", "approved", "pending"])
+      .eq("user_id", user.id)
       .limit(50);
 
     const flights = activeFlights ?? [];
     const now = Date.now();
 
-    // Build position predictions for each flight
     const predictions = await Promise.all(flights.map(async (f: any) => {
       const [oLat, oLon] = await getCoords(f.origin ?? "");
       const [dLat, dLon] = await getCoords(f.destination ?? "");
@@ -68,7 +65,7 @@ serve(async (req) => {
       };
     }));
 
-    // Detect future conflicts between all pairs
+    // Detect conflicts within the user's own fleet.
     const conflicts: Array<{
       aircraft_a: string;
       aircraft_b: string;
@@ -82,16 +79,14 @@ serve(async (req) => {
       for (let j = i + 1; j < predictions.length; j++) {
         const a = predictions[i];
         const b = predictions[j];
-        // Only conflict if same altitude band
         if (a.altitude_band !== b.altitude_band) continue;
 
         for (const posA of a.predicted_positions) {
           const posB = b.predicted_positions.find(p => p.t_plus_min === posA.t_plus_min);
           if (!posB) continue;
           const sep = haversineKm(posA.lat, posA.lon, posB.lat, posB.lon);
-          if (sep < MIN_SEPARATION_KM * 3) { // 1.5km warning zone
+          if (sep < MIN_SEPARATION_KM * 3) {
             const severity = sep < MIN_SEPARATION_KM ? "high" : sep < MIN_SEPARATION_KM * 2 ? "moderate" : "low";
-            // Choose resolution strategy
             let resolution: { type: string; action: string };
             if (severity === "high") {
               resolution = { type: "altitude_adjustment", action: `Move ${b.aircraft_id} to ${b.altitude_band === "low" ? "mid" : "low"} altitude band immediately` };
@@ -108,26 +103,24 @@ serve(async (req) => {
               severity,
               resolution,
             });
-            break; // One conflict per pair
+            break;
           }
         }
       }
     }
 
-    // Calculate system-wide flow efficiency
     const activeCount = predictions.filter(p => p.current_progress > 0 && p.current_progress < 100).length;
     const conflictPenalty = conflicts.length * 5;
     const flowEfficiency = Math.max(0, 100 - conflictPenalty);
 
-    // For the requesting flight, compute specific prediction
     const myFlight = predictions.find(p => p.flight_intent_id === flight_intent_id);
     const myConflicts = conflicts.filter(c => c.aircraft_a === myFlight?.aircraft_id || c.aircraft_b === myFlight?.aircraft_id);
 
     console.info("[trajectory-predictor] prediction summary", {
+      user_id: user.id,
       flight_intent_id,
       total_predictions: predictions.length,
       total_conflicts: conflicts.length,
-      matched_flight: myFlight?.aircraft_id ?? null,
     });
 
     return new Response(JSON.stringify({
@@ -140,6 +133,7 @@ serve(async (req) => {
       analysis_horizon_minutes: 5,
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
+    if (err instanceof Response) return err;
     return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: corsHeaders });
   }
 });
