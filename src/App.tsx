@@ -32,8 +32,8 @@ const queryClient = new QueryClient({
 const AnimatedRoutes = () => {
   const location = useLocation();
   return (
-    <PageTransition>
-      <Suspense fallback={null}>
+    <Suspense fallback={null}>
+      <PageTransition>
         <Routes location={location}>
           <Route path="/" element={<Index />} />
           <Route path="/auth" element={<Auth />} />
@@ -42,8 +42,8 @@ const AnimatedRoutes = () => {
           <Route path="/plan" element={<AuthGuard><FlightPlan /></AuthGuard>} />
           <Route path="*" element={<NotFound />} />
         </Routes>
-      </Suspense>
-    </PageTransition>
+      </PageTransition>
+    </Suspense>
   );
 };
 
