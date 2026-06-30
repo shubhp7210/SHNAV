@@ -138,11 +138,16 @@ Deno.serve(async (req) => {
       weatherDetails = { error: "Weather data unavailable" };
     }
 
-    let score = 95;
-    score -= conflicts.length * 10;
-    if (weatherRisk === "high") score -= 20;
-    else if (weatherRisk === "moderate") score -= 10;
-    if (weatherRisk === "unknown") score -= 5;
+    let score = 80;
+    for (const c of conflicts) {
+      if (c.severity === "high") score -= 20;
+      else if (c.severity === "moderate") score -= 10;
+      else score -= 5;
+    }
+    if (weatherRisk === "high") score -= 25;
+    else if (weatherRisk === "moderate") score -= 12;
+    else if (weatherRisk === "unknown") score -= 8;
+    if (conflicts.length === 0 && weatherRisk === "low") score += 15;
     score = Math.max(10, Math.min(100, score));
 
     await supabase
