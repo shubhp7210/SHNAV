@@ -532,7 +532,7 @@ const FlightPlan = () => {
           <div className="flex items-center gap-2 min-w-0">
             <Plane className="w-4 h-4 text-primary shrink-0" />
             <span className="font-semibold text-sm truncate">
-              <span className="hidden sm:inline">Altos — </span>Flight Planner
+              <span className="hidden sm:inline">SHNAV — </span>Flight Planner
             </span>
           </div>
         </div>

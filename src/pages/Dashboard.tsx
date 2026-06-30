@@ -301,7 +301,7 @@ export default function Dashboard() {
           <div className="w-7 h-7 rounded-lg bg-primary/15 flex items-center justify-center">
             <Plane className="w-3.5 h-3.5 text-primary" />
           </div>
-          <span className="font-bold text-sm tracking-tight">Altos UTM</span>
+          <span className="font-bold text-sm tracking-tight">SHNAV UTM</span>
         </div>
 
         {/* Nav */}

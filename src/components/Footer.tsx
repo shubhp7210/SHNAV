@@ -9,7 +9,7 @@ const Footer = () => {
           Advanced Low Altitude Traffic Operation System
         </p>
         <p className="text-[11px] font-mono text-foreground/40">
-          © {new Date().getFullYear()} ALTOS
+          © {new Date().getFullYear()} SHNAV
         </p>
       </div>
     </footer>

@@ -5,7 +5,7 @@
 @tailwind utilities;
 
 /* ─────────────────────────────────────────────────────────────────
-   ALTOS — Premium monochrome design system
+   SHNAV — Premium monochrome design system
    Pure black canvas, off-white accents, surgical contrast.
    ───────────────────────────────────────────────────────────────── */
 
@@ -159,28 +159,28 @@
 
   /* App-like reveal animations */
   .animate-fade-in {
-    animation: altos-fade-in 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: shnav-fade-in 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
   .animate-rise {
-    animation: altos-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: shnav-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
   .animate-scale-in {
-    animation: altos-scale-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation: shnav-scale-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
-  @keyframes altos-fade-in {
+  @keyframes shnav-fade-in {
     from { opacity: 0; }
     to   { opacity: 1; }
   }
-  @keyframes altos-rise {
+  @keyframes shnav-rise {
     from { opacity: 0; transform: translateY(16px); }
     to   { opacity: 1; transform: translateY(0); }
   }
-  @keyframes altos-scale-in {
+  @keyframes shnav-scale-in {
     from { opacity: 0; transform: scale(0.96); }
     to   { opacity: 1; transform: scale(1); }
   }
-  @keyframes altos-shimmer {
+  @keyframes shnav-shimmer {
     0%   { background-position: -200% 0; }
     100% { background-position: 200% 0; }
   }
@@ -191,6 +191,6 @@
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    animation: altos-shimmer 6s linear infinite;
+    animation: shnav-shimmer 6s linear infinite;
   }
 }

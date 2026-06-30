@@ -45,7 +45,7 @@ const SafetySection = () => {
 
             <div className="mt-10 pt-8 border-t border-border/50">
               <p className="text-muted-foreground text-sm max-w-xl">
-                No re-routing occurs without explicit authorization. Altos is designed to support — not replace — human decision-making in safety-critical operations.
+                No re-routing occurs without explicit authorization. SHNAV is designed to support — not replace — human decision-making in safety-critical operations.
               </p>
             </div>
           </motion.div>

@@ -222,7 +222,7 @@ export default function Auth() {
                           value={email}
                           onChange={(e) => setEmail(e.target.value)}
                           required
-                          placeholder="pilot@altos.air"
+                          placeholder="pilot@shnav.air"
                           className="w-full bg-secondary border border-border rounded-md pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                         />
                       </div>
@@ -305,7 +305,7 @@ export default function Auth() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
-                placeholder="pilot@altos.air"
+                placeholder="pilot@shnav.air"
                 className="w-full bg-secondary border border-border rounded-md pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
               />
             </div>

@@ -1,5 +1,5 @@
 /**
- * FlightAudio — Web Audio API engine for Altos flight simulation.
+ * FlightAudio — Web Audio API engine for SHNAV flight simulation.
  * All sounds are generated procedurally; no audio files required.
  */
 

@@ -120,16 +120,16 @@ function calcBearing(a: [number, number], b: [number, number]): number {
 
 // ── CSS injection (once) ──────────────────────────────────────────────────────
 function injectStyles() {
-  if (document.getElementById("altos-map-css")) return;
+  if (document.getElementById("shnav-map-css")) return;
   const s = document.createElement("style");
-  s.id = "altos-map-css";
+  s.id = "shnav-map-css";
   s.textContent = `
-    @keyframes altos-pulse {
+    @keyframes shnav-pulse {
       0%   { transform: scale(1);   opacity: 0.85; }
       70%  { transform: scale(2.8); opacity: 0; }
       100% { transform: scale(2.8); opacity: 0; }
     }
-    .altos-ring { animation: altos-pulse 2.2s ease-out infinite; }
+    .shnav-ring { animation: shnav-pulse 2.2s ease-out infinite; }
 
     /* Navigation control dark theme */
     .maplibregl-ctrl-group {
@@ -164,7 +164,7 @@ function createAircraftEl(): HTMLElement {
   const wrap = document.createElement("div");
   wrap.style.cssText = "width:44px;height:44px;position:relative;cursor:default;";
   wrap.innerHTML = `
-    <div class="altos-ring" style="
+    <div class="shnav-ring" style="
       position:absolute;inset:10px;border-radius:50%;
       background:rgba(45,212,191,0.4);
     "></div>
@@ -435,7 +435,7 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       if (vectorSourceId) {
         // ── 3D building walls ────────────────────────────────────────────
         map.addLayer({
-          id: "altos-buildings-walls",
+          id: "shnav-buildings-walls",
           type: "fill-extrusion",
           source: vectorSourceId,
           "source-layer": "building",
@@ -454,7 +454,7 @@ const StepMonitoring = ({ data, updateData }: Props) => {
 
         // ── 3D building rooftops (brighter highlight layer) ───────────────
         map.addLayer({
-          id: "altos-buildings-roofs",
+          id: "shnav-buildings-roofs",
           type: "fill-extrusion",
           source: vectorSourceId,
           "source-layer": "building",

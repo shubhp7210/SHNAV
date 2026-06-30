@@ -7,7 +7,7 @@ import Logo from "@/components/Logo";
 
 /**
  * Immersive, app-like hero. Full-bleed, no traditional header/CTAs.
- * Built around the ALTOS wordmark and a live status strip — feels like booting an app.
+ * Built around the SHNAV wordmark and a live status strip — feels like booting an app.
  */
 const HeroSection = () => {
   const { session } = useAuth();
@@ -96,7 +96,7 @@ const HeroSection = () => {
           transition={{ delay: 0.45, duration: 0.7 }}
           className="mt-7 max-w-xl text-center text-[15px] leading-relaxed text-foreground/55"
         >
-          ALTOS coordinates eVTOL and rotorcraft traffic in real time —
+          SHNAV coordinates eVTOL and rotorcraft traffic in real time —
           predicting conflicts, routing around weather, and clearing flights
           in seconds, not hours.
         </motion.p>

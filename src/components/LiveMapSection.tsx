@@ -30,7 +30,7 @@ function createAircraftEl(color: string): HTMLElement {
   wrap.style.cssText = "width:38px;height:38px;position:relative;pointer-events:none;";
   wrap.innerHTML = `
     <div style="position:absolute;inset:9px;border-radius:50%;background:${color}44;
-      animation:altos-hero-pulse 2.4s ease-out infinite;"></div>
+      animation:shnav-hero-pulse 2.4s ease-out infinite;"></div>
     <div style="position:absolute;inset:6px;border-radius:50%;
       background:radial-gradient(circle at 38% 32%,#0d2a3a,#050a14);
       border:1.5px solid ${color};
@@ -198,11 +198,11 @@ export default function LiveMapSection() {
   }, [ready]);
 
   useEffect(() => {
-    if (!document.getElementById("altos-hero-kf")) {
+    if (!document.getElementById("shnav-hero-kf")) {
       const s = document.createElement("style");
-      s.id = "altos-hero-kf";
+      s.id = "shnav-hero-kf";
       s.textContent = `
-        @keyframes altos-hero-pulse {
+        @keyframes shnav-hero-pulse {
           0%   { transform:scale(1);   opacity:0.8; }
           70%  { transform:scale(2.6); opacity:0;   }
           100% { transform:scale(2.6); opacity:0;   }
