@@ -10,23 +10,25 @@ interface LogoProps {
 
 export default function Logo({ className, size = 28, showWordmark = true, compact = false }: LogoProps) {
   return (
-    <div className={cn("flex items-center gap-2.5 select-none", className)}>
-      <img
-        src={logo}
-        alt="SHNAV"
-        width={size}
-        height={size}
-        className="object-contain"
-        style={{
-          mixBlendMode: "screen",
-          filter: "drop-shadow(0 0 12px hsl(0 0% 100% / 0.18))",
-        }}
-      />
+    <div className={cn("flex items-center gap-2 select-none", className)}>
+      {/* Logo PNG lives on a white bg — wrap it in a tight icon container */}
+      <div
+        className="rounded-lg overflow-hidden bg-white flex-shrink-0 flex items-center justify-center"
+        style={{ width: size, height: size }}
+      >
+        <img
+          src={logo}
+          alt="SHNAV"
+          width={size}
+          height={size}
+          className="object-contain"
+        />
+      </div>
       {showWordmark && (
         <span
           className={cn(
-            "font-semibold tracking-[0.22em] text-foreground/95",
-            compact ? "text-xs" : "text-sm"
+            "font-bold tracking-[0.18em] text-primary",
+            compact ? "text-[11px]" : "text-sm"
           )}
         >
           SHNAV

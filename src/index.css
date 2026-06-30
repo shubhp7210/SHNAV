@@ -5,57 +5,54 @@
 @tailwind utilities;
 
 /* ─────────────────────────────────────────────────────────────────
-   SHNAV — Premium monochrome design system
-   Pure black canvas, off-white accents, surgical contrast.
+   SHNAV — Design system
+   Deep black canvas · Coral-red brand accent · Aviation precision
    ───────────────────────────────────────────────────────────────── */
 
 @layer base {
   :root {
-    --background: 0 0% 3%;
-    --foreground: 0 0% 96%;
+    --background: 0 0% 4%;
+    --foreground: 0 0% 95%;
 
-    --card: 0 0% 6%;
-    --card-foreground: 0 0% 96%;
+    --card: 0 0% 7%;
+    --card-foreground: 0 0% 95%;
 
-    --popover: 0 0% 5%;
-    --popover-foreground: 0 0% 96%;
+    --popover: 0 0% 6%;
+    --popover-foreground: 0 0% 95%;
 
-    /* Primary = bright white (the brand voice) */
-    --primary: 0 0% 98%;
-    --primary-foreground: 0 0% 4%;
+    /* Brand coral — matched to logo */
+    --primary: 5 72% 60%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 0 0% 10%;
-    --secondary-foreground: 0 0% 90%;
+    --secondary: 0 0% 11%;
+    --secondary-foreground: 0 0% 88%;
 
-    --muted: 0 0% 9%;
-    --muted-foreground: 0 0% 55%;
+    --muted: 0 0% 10%;
+    --muted-foreground: 0 0% 52%;
 
-    --accent: 0 0% 100%;
-    --accent-foreground: 0 0% 4%;
+    --accent: 5 72% 60%;
+    --accent-foreground: 0 0% 100%;
 
     --destructive: 0 70% 55%;
     --destructive-foreground: 0 0% 98%;
 
-    --border: 0 0% 14%;
-    --input: 0 0% 14%;
-    --ring: 0 0% 98%;
+    --border: 0 0% 13%;
+    --input: 0 0% 13%;
+    --ring: 5 72% 60%;
 
     --radius: 0.75rem;
 
-    /* Premium gradients & shadows */
-    --gradient-radial: radial-gradient(circle at 50% 0%, hsl(0 0% 14% / 0.6), transparent 60%);
-    --gradient-mono: linear-gradient(135deg, hsl(0 0% 100%) 0%, hsl(0 0% 70%) 100%);
     --shadow-elev: 0 30px 80px -30px hsl(0 0% 0% / 0.9), 0 8px 24px -8px hsl(0 0% 0% / 0.6);
-    --shadow-glow: 0 0 60px -10px hsl(0 0% 100% / 0.18);
+    --shadow-glow: 0 0 60px -10px hsl(5 72% 60% / 0.25);
 
     --sidebar-background: 0 0% 4%;
     --sidebar-foreground: 0 0% 90%;
-    --sidebar-primary: 0 0% 98%;
-    --sidebar-primary-foreground: 0 0% 4%;
+    --sidebar-primary: 5 72% 60%;
+    --sidebar-primary-foreground: 0 0% 100%;
     --sidebar-accent: 0 0% 9%;
     --sidebar-accent-foreground: 0 0% 96%;
-    --sidebar-border: 0 0% 14%;
-    --sidebar-ring: 0 0% 98%;
+    --sidebar-border: 0 0% 13%;
+    --sidebar-ring: 5 72% 60%;
   }
 }
 
@@ -68,15 +65,10 @@
     @apply bg-background text-foreground font-sans antialiased;
     font-feature-settings: "ss01", "cv11";
     -webkit-font-smoothing: antialiased;
-    /* Prevent rubber-banding on iOS while keeping internal scroll containers smooth. */
     overscroll-behavior-y: none;
-    /* Touch-action manipulation removes the 300ms tap delay on older mobile browsers. */
     touch-action: manipulation;
   }
 
-  /* Honor OS-level reduced-motion preferences globally. Individual animations
-     can still opt-in to reduced versions via useReducedMotion(), but this
-     ensures no third-party CSS sneaks past the gate. */
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation-duration: 0.01ms !important;
@@ -86,50 +78,45 @@
     }
   }
 
-  /* Refined selection */
   ::selection {
-    background: hsl(var(--foreground));
-    color: hsl(var(--background));
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
   }
 
-  /* Slim, almost invisible scrollbar — feels native-app */
-  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: hsl(0 0% 18%); border-radius: 999px; }
-  ::-webkit-scrollbar-thumb:hover { background: hsl(0 0% 30%); }
+  ::-webkit-scrollbar-thumb { background: hsl(0 0% 16%); border-radius: 999px; }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(0 0% 28%); }
 }
 
 @layer utilities {
-  /* Used by mobile stepper and other horizontal-scroll regions that want
-     to be swipeable without showing a visible scrollbar. */
   .no-scrollbar {
     scrollbar-width: none;
     -ms-overflow-style: none;
   }
   .no-scrollbar::-webkit-scrollbar { display: none; }
 
-  /* Safe-area-aware bottom padding for sticky elements above the mobile tab bar. */
   .pb-safe {
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
-  .text-gradient-mono {
+  .text-gradient-coral {
     @apply bg-clip-text text-transparent;
-    background-image: linear-gradient(180deg, hsl(0 0% 100%) 0%, hsl(0 0% 60%) 100%);
+    background-image: linear-gradient(135deg, hsl(5 72% 70%) 0%, hsl(5 72% 50%) 100%);
   }
 
   .glass-card {
-    background: hsl(0 0% 8% / 0.6);
+    background: hsl(0 0% 8% / 0.65);
     backdrop-filter: blur(24px) saturate(150%);
     -webkit-backdrop-filter: blur(24px) saturate(150%);
     border: 1px solid hsl(0 0% 100% / 0.06);
   }
 
   .glass-panel {
-    background: hsl(0 0% 6% / 0.75);
+    background: hsl(0 0% 6% / 0.8);
     backdrop-filter: blur(32px) saturate(160%);
     -webkit-backdrop-filter: blur(32px) saturate(160%);
-    border: 1px solid hsl(0 0% 100% / 0.08);
+    border: 1px solid hsl(0 0% 100% / 0.07);
     box-shadow: var(--shadow-elev);
   }
 
@@ -137,12 +124,16 @@
     box-shadow: var(--shadow-glow);
   }
 
+  .glow-primary {
+    box-shadow: 0 0 48px -12px hsl(5 72% 60% / 0.3);
+  }
+
   .grid-pattern {
     background-image:
-      linear-gradient(hsl(0 0% 100% / 0.025) 1px, transparent 1px),
-      linear-gradient(90deg, hsl(0 0% 100% / 0.025) 1px, transparent 1px);
-    background-size: 64px 64px;
-    mask-image: radial-gradient(ellipse at center, black 40%, transparent 80%);
+      linear-gradient(hsl(0 0% 100% / 0.022) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(0 0% 100% / 0.022) 1px, transparent 1px);
+    background-size: 60px 60px;
+    mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
   }
 
   .noise {
@@ -152,12 +143,11 @@
     content: "";
     position: absolute; inset: 0;
     pointer-events: none;
-    opacity: 0.04;
+    opacity: 0.035;
     mix-blend-mode: overlay;
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
   }
 
-  /* App-like reveal animations */
   .animate-fade-in {
     animation: shnav-fade-in 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
   }
@@ -173,7 +163,7 @@
     to   { opacity: 1; }
   }
   @keyframes shnav-rise {
-    from { opacity: 0; transform: translateY(16px); }
+    from { opacity: 0; transform: translateY(18px); }
     to   { opacity: 1; transform: translateY(0); }
   }
   @keyframes shnav-scale-in {
@@ -185,12 +175,19 @@
     100% { background-position: 200% 0; }
   }
 
+  /* Coral shimmer for brand text */
   .shimmer-text {
-    background: linear-gradient(90deg, hsl(0 0% 60%) 0%, hsl(0 0% 100%) 50%, hsl(0 0% 60%) 100%);
+    background: linear-gradient(
+      90deg,
+      hsl(5 72% 45%) 0%,
+      hsl(5 72% 72%) 40%,
+      hsl(5 72% 60%) 60%,
+      hsl(5 72% 45%) 100%
+    );
     background-size: 200% 100%;
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    animation: shnav-shimmer 6s linear infinite;
+    animation: shnav-shimmer 5s linear infinite;
   }
 }

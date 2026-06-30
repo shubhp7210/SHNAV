@@ -112,7 +112,9 @@ export default function Auth() {
   };
 
   return (
-    <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4">
+    <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4 relative overflow-hidden">
+      <div className="absolute inset-0 -z-10 grid-pattern opacity-30 pointer-events-none" />
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[80%] h-[40vh] -z-10 pointer-events-none" style={{ background: "radial-gradient(ellipse at top center, hsl(5 72% 50% / 0.06), transparent 70%)" }} />
       {/* Logo */}
       <motion.div
         initial={{ opacity: 0, y: -20 }}

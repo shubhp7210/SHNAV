@@ -11,10 +11,6 @@ const NAV = [
   { to: "/dashboard", label: "Operations" },
 ];
 
-/**
- * Floating top dock — replaces the traditional website header.
- * Glassy, rounded, hover-aware. Looks/feels like a native app shell.
- */
 export default function TopDock() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
@@ -29,7 +25,6 @@ export default function TopDock() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Hide dock entirely inside auth pages — they have their own minimal chrome.
   if (pathname.startsWith("/auth")) return null;
 
   return (
@@ -43,12 +38,12 @@ export default function TopDock() {
         <div
           className={`pointer-events-auto flex items-center gap-1 rounded-full px-2 py-2 transition-all duration-300 ${
             scrolled
-              ? "bg-background/70 border border-white/10 backdrop-blur-xl shadow-[0_8px_32px_-12px_rgba(0,0,0,0.6)]"
-              : "bg-background/30 border border-white/5 backdrop-blur-md"
+              ? "bg-background/75 border border-white/10 backdrop-blur-xl shadow-[0_8px_32px_-12px_rgba(0,0,0,0.7)]"
+              : "bg-background/25 border border-white/6 backdrop-blur-md"
           }`}
         >
-          <Link to="/" className="flex items-center pl-2 pr-3 py-1">
-            <Logo size={20} compact />
+          <Link to="/" className="flex items-center pl-2 pr-3 py-0.5">
+            <Logo size={22} compact />
           </Link>
 
           <div className="hidden md:flex items-center gap-0.5">
@@ -59,13 +54,13 @@ export default function TopDock() {
                   key={item.to}
                   to={item.to}
                   className={`relative px-3.5 py-1.5 text-[12px] font-medium tracking-wide rounded-full transition-colors ${
-                    active ? "text-foreground" : "text-foreground/55 hover:text-foreground"
+                    active ? "text-foreground" : "text-foreground/50 hover:text-foreground"
                   }`}
                 >
                   {active && (
                     <motion.span
                       layoutId="dock-pill"
-                      className="absolute inset-0 rounded-full bg-white/8 border border-white/10"
+                      className="absolute inset-0 rounded-full bg-white/7 border border-white/10"
                       transition={{ type: "spring", stiffness: 380, damping: 30 }}
                     />
                   )}
@@ -77,7 +72,7 @@ export default function TopDock() {
 
           <button
             onClick={() => navigate(session ? "/dashboard" : "/auth")}
-            className="hidden md:inline-flex items-center gap-1 ml-1 pl-3.5 pr-3 py-1.5 rounded-full bg-foreground text-background text-[12px] font-medium hover:bg-foreground/90 transition-colors"
+            className="hidden md:inline-flex items-center gap-1 ml-1 pl-3.5 pr-3 py-1.5 rounded-full bg-primary text-primary-foreground text-[12px] font-semibold hover:bg-primary/88 transition-colors"
           >
             {session ? "Open" : "Launch"}
             <ArrowUpRight className="w-3 h-3" strokeWidth={2.5} />
@@ -85,7 +80,7 @@ export default function TopDock() {
 
           <button
             onClick={() => setOpen(true)}
-            className="md:hidden p-2 text-foreground/80"
+            className="md:hidden p-2 text-foreground/70"
             aria-label="Open menu"
           >
             <Menu className="w-4 h-4" />
@@ -100,26 +95,28 @@ export default function TopDock() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[60] md:hidden bg-background/95 backdrop-blur-xl flex flex-col"
+            className="fixed inset-0 z-[60] md:hidden bg-background/96 backdrop-blur-xl flex flex-col"
           >
             <div className="flex items-center justify-between p-4">
-              <Logo size={22} compact />
-              <button onClick={() => setOpen(false)} className="p-2"><X className="w-5 h-5" /></button>
+              <Logo size={24} compact />
+              <button onClick={() => setOpen(false)} className="p-2 text-foreground/60 hover:text-foreground transition-colors">
+                <X className="w-5 h-5" />
+              </button>
             </div>
-            <nav className="flex-1 flex flex-col items-center justify-center gap-2 -mt-12">
+            <nav className="flex-1 flex flex-col items-center justify-center gap-1 -mt-12">
               {NAV.map((item) => (
                 <Link
                   key={item.to}
                   to={item.to}
                   onClick={() => setOpen(false)}
-                  className="text-3xl font-semibold tracking-tightest text-foreground/85 hover:text-foreground py-2"
+                  className="text-[2.5rem] font-semibold tracking-tight text-foreground/75 hover:text-foreground py-2 transition-colors"
                 >
                   {item.label}
                 </Link>
               ))}
               <button
                 onClick={() => { setOpen(false); navigate(session ? "/dashboard" : "/auth"); }}
-                className="mt-8 px-6 py-3 rounded-full bg-foreground text-background font-medium"
+                className="mt-10 px-7 py-3 rounded-full bg-primary text-primary-foreground font-semibold text-base hover:bg-primary/90 transition-colors"
               >
                 {session ? "Open app" : "Launch app"}
               </button>
