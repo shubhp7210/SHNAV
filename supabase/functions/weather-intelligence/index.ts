@@ -1,4 +1,3 @@
-import { serve } from "std/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { CORS_HEADERS } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
@@ -20,7 +19,7 @@ function applyMicroWeather(lat: number, lon: number, windSpeed: number, gusts: n
   };
 }
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {

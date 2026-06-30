@@ -1,4 +1,3 @@
-import { serve } from "std/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { requireUserAuth } from "../_shared/auth.ts";
 
@@ -34,7 +33,7 @@ function simulateShortTerm(params: {
   };
 }
 
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
