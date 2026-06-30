@@ -1,0 +1,5 @@
+/* Reset Vite default centering — ALTOS uses full-bleed layouts. */
+#root {
+  width: 100%;
+  min-height: 100vh;
+}
