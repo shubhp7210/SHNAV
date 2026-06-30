@@ -25,7 +25,7 @@ export default function TopDock() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  if (pathname.startsWith("/auth")) return null;
+  if (pathname.startsWith("/auth") || pathname.startsWith("/dashboard") || pathname.startsWith("/plan")) return null;
 
   return (
     <>
