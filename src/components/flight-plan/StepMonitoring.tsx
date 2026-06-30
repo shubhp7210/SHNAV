@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import { CheckCircle, AlertTriangle, Radio, Lock, Unlock, Volume2, VolumeX, Navigation, Zap, Activity } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { CheckCircle, AlertTriangle, Radio, Lock, Unlock, Volume2, VolumeX, Navigation, Zap, Activity, Home, LayoutDashboard, ArrowRight } from "lucide-react";
+import { motion } from "framer-motion";
 import type { FlightPlanData } from "@/pages/FlightPlan";
 import type { TrajectoryPredictorResult, FutureConflict } from "@/lib/atmTypes";
 import maplibregl from "maplibre-gl";
@@ -271,6 +273,7 @@ const ROOF_COLOR_EXPR: maplibregl.ExpressionSpecification = [
 
 // ─────────────────────────────────────────────────────────────────────────────
 const StepMonitoring = ({ data, updateData }: Props) => {
+  const navigate      = useNavigate();
   const mapContainer  = useRef<HTMLDivElement>(null);
   const mapRef        = useRef<maplibregl.Map | null>(null);
   const markerRef     = useRef<maplibregl.Marker | null>(null);
@@ -284,6 +287,7 @@ const StepMonitoring = ({ data, updateData }: Props) => {
   const waypointsHit  = useRef(new Set<number>());  // 25 / 50 / 75 / 100
 
   const [progress,   setProgress]   = useState(0);
+  const [completed,  setCompleted]  = useState(false);
   const [status,     setStatus]     = useState<"nominal" | "alert">("nominal");
   const [mapReady,   setMapReady]   = useState(false);
   const [followMode, setFollowMode] = useState(true);
@@ -779,6 +783,95 @@ const StepMonitoring = ({ data, updateData }: Props) => {
         else console.info("[lifecycle] flight marked landed and archived");
       });
   }, [progress, data.flightIntentId]);
+
+  // ── Mark flight complete 1.5 s after landing (lets arrival audio finish) ──
+  useEffect(() => {
+    if (progress < 1) return;
+    const t = setTimeout(() => setCompleted(true), 1500);
+    return () => clearTimeout(t);
+  }, [progress]);
+
+  // ── Completion screen ─────────────────────────────────────────────────────
+  if (completed) {
+    const score = data.trajectoryScore ?? 0;
+    const scoreColor = score >= 80 ? "#34d399" : score >= 60 ? "#fbbf24" : "#f87171";
+    return (
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.5 }}
+        className="flex flex-col items-center text-center py-6 gap-6"
+      >
+        {/* Checkmark ring */}
+        <motion.div
+          initial={{ scale: 0.6, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ type: "spring", stiffness: 260, damping: 18, delay: 0.1 }}
+          className="relative flex items-center justify-center"
+        >
+          <div className="absolute inset-0 rounded-full bg-emerald-400/10 animate-ping" style={{ width: 88, height: 88 }} />
+          <div className="w-20 h-20 rounded-full bg-emerald-400/10 border-2 border-emerald-400/50 flex items-center justify-center">
+            <CheckCircle className="w-9 h-9 text-emerald-400" strokeWidth={1.75} />
+          </div>
+        </motion.div>
+
+        {/* Title */}
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.25 }}
+        >
+          <p className="text-[11px] font-mono tracking-[0.25em] uppercase text-emerald-400 mb-1">Mission Complete</p>
+          <h3 className="text-2xl font-bold">Flight Landed</h3>
+          <p className="text-sm text-muted-foreground mt-1 font-mono">
+            {data.origin || "Origin"} <ArrowRight className="inline w-3.5 h-3.5 text-primary" /> {data.destination || "Destination"}
+          </p>
+        </motion.div>
+
+        {/* Stats */}
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.4 }}
+          className="grid grid-cols-3 gap-3 w-full max-w-sm"
+        >
+          {[
+            { label: "Aircraft",   value: data.aircraftId || "—" },
+            { label: "Traj Score", value: String(score), valueStyle: { color: scoreColor } },
+            { label: "Status",     value: "Nominal",     valueStyle: { color: "#34d399" } },
+          ].map(({ label, value, valueStyle }) => (
+            <div key={label} className="glass-card rounded-xl px-3 py-3.5">
+              <p className="text-base font-bold font-mono" style={valueStyle ?? {}}>{value}</p>
+              <p className="text-[10px] text-muted-foreground mt-0.5 tracking-wide">{label}</p>
+            </div>
+          ))}
+        </motion.div>
+
+        {/* Buttons */}
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.55 }}
+          className="flex flex-col sm:flex-row gap-3 w-full max-w-sm"
+        >
+          <button
+            onClick={() => navigate("/")}
+            className="flex-1 flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-primary text-primary-foreground font-semibold text-sm hover:bg-primary/90 transition-all hover:scale-[1.02] active:scale-[0.98] shadow-[0_8px_30px_-8px_hsl(5_72%_60%_/_0.5)]"
+          >
+            <Home className="w-4 h-4" />
+            Back to Home
+          </button>
+          <button
+            onClick={() => navigate("/dashboard")}
+            className="flex-1 flex items-center justify-center gap-2 px-5 py-3 rounded-xl border border-border text-foreground/70 font-medium text-sm hover:bg-secondary/40 hover:text-foreground transition-all"
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            Dashboard
+          </button>
+        </motion.div>
+      </motion.div>
+    );
+  }
 
   // ── Idle screen ───────────────────────────────────────────────────────────
   if (!data.monitoringActive) {
