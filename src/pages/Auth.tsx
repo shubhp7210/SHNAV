@@ -9,6 +9,9 @@ import { useToast } from "@/hooks/use-toast";
 
 type Screen = "login" | "signup-1" | "signup-2" | "reset" | "reset-sent";
 
+const MAX_ATTEMPTS = 5;
+const LOCKOUT_MS = 10 * 60 * 1000; // 10 minutes
+
 export default function Auth() {
   const [screen, setScreen] = useState<Screen>("login");
   const [email, setEmail] = useState("");
@@ -18,6 +21,8 @@ export default function Auth() {
   const [showPw, setShowPw] = useState(false);
   const [loading, setLoading] = useState(false);
   const [unconfirmedEmail, setUnconfirmedEmail] = useState("");
+  const [failedAttempts, setFailedAttempts] = useState(0);
+  const [lockedUntil, setLockedUntil] = useState<number | null>(null);
   const { session } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -26,19 +31,32 @@ export default function Auth() {
     if (session) navigate("/dashboard", { replace: true });
   }, [session, navigate]);
 
+  const isLockedOut = lockedUntil !== null && Date.now() < lockedUntil;
+  const lockoutSecondsLeft = lockedUntil ? Math.ceil((lockedUntil - Date.now()) / 1000) : 0;
+
   // ── Sign in ────────────────────────────────────────────────────
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLockedOut) return;
     setLoading(true);
     try {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
+      setFailedAttempts(0);
+      setLockedUntil(null);
       navigate("/dashboard", { replace: true });
     } catch (err: any) {
       if (err.message?.toLowerCase().includes("email not confirmed") || err.code === "email_not_confirmed") {
         setUnconfirmedEmail(email);
       } else {
-        toast({ title: "Sign in failed", description: err.message, variant: "destructive" });
+        const next = failedAttempts + 1;
+        setFailedAttempts(next);
+        if (next >= MAX_ATTEMPTS) {
+          setLockedUntil(Date.now() + LOCKOUT_MS);
+          toast({ title: "Account temporarily locked", description: `Too many failed attempts. Try again in 10 minutes.`, variant: "destructive" });
+        } else {
+          toast({ title: "Sign in failed", description: `${err.message}. ${MAX_ATTEMPTS - next} attempt${MAX_ATTEMPTS - next === 1 ? "" : "s"} remaining.`, variant: "destructive" });
+        }
       }
     } finally {
       setLoading(false);
@@ -229,9 +247,14 @@ export default function Auth() {
                 </div>
               </div>
 
+              {isLockedOut && (
+                <div className="p-3 rounded-lg border border-destructive/30 bg-destructive/8">
+                  <p className="text-xs text-destructive font-mono">Account locked — retry in {lockoutSecondsLeft}s</p>
+                </div>
+              )}
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || isLockedOut}
                 className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground rounded-lg py-2.5 font-semibold text-sm hover:bg-primary/90 transition-colors disabled:opacity-50 mt-1"
               >
                 {loading ? "Signing in…" : <><span>Sign In</span><ArrowRight className="w-4 h-4" /></>}

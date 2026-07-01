@@ -1,6 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
-  CORS_HEADERS,
+  getCorsHeaders,
   EVTOL_BASE_SPEED_KMH as EVTOL_SPEED_KMH,
   MIN_SEPARATION_KM,
 } from "../_shared/constants.ts";
@@ -8,9 +8,9 @@ import { requireUserAuth } from "../_shared/auth.ts";
 import { getCoords } from "../_shared/geocode.ts";
 import { haversineKm, interpolatePosition } from "../_shared/geo.ts";
 
-const corsHeaders = CORS_HEADERS;
 
 Deno.serve(async (req) => {
+  const corsHeaders = getCorsHeaders(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {

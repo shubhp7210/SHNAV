@@ -3,7 +3,7 @@
 // the top 3. Weights are pulled from route_score_config so the learning loop
 // can adjust them from actual outcomes.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { CORS_HEADERS, EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
+import { getCorsHeaders, EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
 import { getCoords } from "../_shared/geocode.ts";
 import {
@@ -19,7 +19,6 @@ import {
   WxCache,
 } from "../_shared/weather.ts";
 
-const corsHeaders = CORS_HEADERS;
 const KM_PER_DEG_LAT = 111.32;
 
 // ── Route geometry ──────────────────────────────────────────────────────────
@@ -270,6 +269,7 @@ function computeWindDrift(ev: RouteEval) {
 // ── Main handler ─────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
+  const corsHeaders = getCorsHeaders(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   const json = (payload: unknown, status = 200) =>

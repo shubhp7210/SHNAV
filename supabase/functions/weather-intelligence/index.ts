@@ -1,5 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { CORS_HEADERS } from "../_shared/constants.ts";
+import { getCorsHeaders } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
 import { getCoords } from "../_shared/geocode.ts";
 import {
@@ -8,7 +8,6 @@ import {
   weatherCodeToDescription,
 } from "../_shared/weather.ts";
 
-const corsHeaders = CORS_HEADERS;
 
 function applyMicroWeather(lat: number, lon: number, windSpeed: number, gusts: number, temp: number) {
   return {
@@ -20,6 +19,7 @@ function applyMicroWeather(lat: number, lon: number, windSpeed: number, gusts: n
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = getCorsHeaders(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {

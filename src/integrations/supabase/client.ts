@@ -23,9 +23,12 @@ if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";
 
+// sessionStorage keeps the JWT only for the lifetime of the browser tab.
+// This limits the XSS token-theft window compared to localStorage (which
+// persists indefinitely across tabs and restarts).
 export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: {
-    storage: localStorage,
+    storage: sessionStorage,
     persistSession: true,
     autoRefreshToken: true,
     detectSessionInUrl: true,

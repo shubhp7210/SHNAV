@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Plane, LogOut, Plus, Activity, AlertTriangle,
   TrendingUp, ArrowRight, Clock, BarChart3,
   CheckCircle2, AlertCircle, Loader,
   CheckCircle, Navigation, Shield, Wind,
-  Radio, Cpu, MapPin, Zap, ChevronRight,
+  Radio, Cpu, MapPin, Zap, ChevronRight, Home,
 } from "lucide-react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -39,6 +39,16 @@ interface HistoricalFlight {
   landed_at: string | null;
   archived_at: string;
 }
+interface Vertiport {
+  name: string;
+  lat: number;
+  lon: number;
+}
+interface MapRoute {
+  from: [number, number];
+  to: [number, number];
+  status: string;
+}
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; dot: string }> = {
   pending:   { label: "Pending",   color: "text-amber-400",   dot: "bg-amber-400" },
@@ -62,6 +72,22 @@ const ATM_SYSTEMS = [
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+function buildArc(from: [number, number], to: [number, number]): [number, number][] {
+  const pts: [number, number][] = [];
+  for (let i = 0; i <= 60; i++) {
+    const t = i / 60;
+    const arc = Math.sin(t * Math.PI) * 0.008;
+    pts.push([from[0] + (to[0] - from[0]) * t + arc * 0.4, from[1] + (to[1] - from[1]) * t + arc]);
+  }
+  return pts;
+}
+
+function routeColor(status: string): string {
+  if (["in_air", "active", "analyzing"].includes(status)) return "#e05644";
+  if (["approved", "boarding"].includes(status)) return "rgba(255,255,255,0.65)";
+  return "#fbbf24";
+}
+
 function ScoreRing({ score, size = 44 }: { score: number; size?: number }) {
   const r = size / 2 - 5;
   const circ = 2 * Math.PI * r;
@@ -80,82 +106,122 @@ function ScoreRing({ score, size = 44 }: { score: number; size?: number }) {
   );
 }
 
-// ── Map component (reused across tabs) ───────────────────────────────────────
-function OpsMap({ interactive = false }: { interactive?: boolean }) {
+// ── Map component ─────────────────────────────────────────────────────────────
+function OpsMap({ interactive = false, routes }: { interactive?: boolean; routes?: MapRoute[] }) {
   const ref = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
 
   useEffect(() => {
-    if (!ref.current || mapRef.current) return;
-    const map = new maplibregl.Map({
-      container: ref.current,
-      style: "https://tiles.openfreemap.org/styles/liberty",
-      center: [-73.9857, 40.7484],
-      zoom: interactive ? 12 : 13.5,
-      pitch: interactive ? 45 : 62,
-      bearing: -20,
-      interactive,
-      attributionControl: false,
-      antialias: true,
-    });
-    map.on("load", () => {
-      map.getStyle().layers?.forEach((layer: any) => {
-        const lo = layer.id.toLowerCase();
-        try {
-          if (layer.type === "background") map.setPaintProperty(layer.id, "background-color", "#040912");
-          else if (layer.type === "fill") {
-            if (lo.includes("water")) map.setPaintProperty(layer.id, "fill-color", "#050c1a");
-            else if (lo.includes("building")) map.setPaintProperty(layer.id, "fill-opacity", 0);
-            else map.setPaintProperty(layer.id, "fill-color", "#060e1c");
-          } else if (layer.type === "line") {
-            if (lo.includes("motorway")) map.setPaintProperty(layer.id, "line-color", "#142d52");
-            else if (lo.includes("primary")) map.setPaintProperty(layer.id, "line-color", "#0d2240");
-            else map.setPaintProperty(layer.id, "line-color", "#060d1c");
-          } else if (layer.type === "symbol") {
-            if (lo.includes("place") || lo.includes("city")) {
-              try { map.setPaintProperty(layer.id, "text-color", "#4db8d4"); } catch {}
-              try { map.setPaintProperty(layer.id, "text-halo-color", "#020811"); } catch {}
-            } else {
-              try { map.setPaintProperty(layer.id, "text-opacity", 0); } catch {}
-              try { map.setPaintProperty(layer.id, "icon-opacity", 0); } catch {}
-            }
-          } else if (layer.type === "fill-extrusion") {
-            map.setPaintProperty(layer.id, "fill-extrusion-opacity", 0);
-          }
-        } catch {}
+    if (!ref.current) return;
+
+    const init = () => {
+      if (!ref.current || mapRef.current) return;
+      const { width, height } = ref.current.getBoundingClientRect();
+      if (width === 0 || height === 0) return; // wait for real dimensions
+
+      const map = new maplibregl.Map({
+        container: ref.current,
+        style: "https://tiles.openfreemap.org/styles/bright",
+        center: [-73.9857, 40.7484],
+        zoom: interactive ? 12 : 13.5,
+        pitch: interactive ? 45 : 62,
+        bearing: -20,
+        interactive,
+        attributionControl: false,
+        antialias: true,
       });
 
-      const bldgLayer = map.getStyle().layers?.find((l: any) => l["source-layer"] === "building") as any;
-      const srcId = bldgLayer?.source;
-      if (srcId) {
-        map.addLayer({
-          id: "db-bldg",
-          type: "fill-extrusion",
-          source: srcId,
-          "source-layer": "building",
-          minzoom: 12,
-          paint: {
-            "fill-extrusion-color": ["interpolate", ["linear"],
-              ["coalesce", ["get", "render_height"], ["get", "height"], 4],
-              0, "#060e1e", 30, "#0c3b63", 80, "#0a72a8", 150, "#06b6d4"],
-            "fill-extrusion-height": ["max", ["coalesce", ["get", "render_height"], ["get", "height"], 6], 6],
-            "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
-            "fill-extrusion-opacity": 0.9,
-          },
-        });
-      }
+      map.on("load", () => {
+        map.resize();
 
-      if (!interactive) {
-        let bearing = -20;
-        const tick = () => { bearing += 0.015; map.setBearing(bearing % 360); requestAnimationFrame(tick); };
-        requestAnimationFrame(tick);
-      }
+        const bldgLayer = map.getStyle().layers?.find((l: any) => l["source-layer"] === "building") as any;
+        const srcId = bldgLayer?.source;
+        if (srcId) {
+          map.addLayer({
+            id: "db-bldg",
+            type: "fill-extrusion",
+            source: srcId,
+            "source-layer": "building",
+            minzoom: 12,
+            paint: {
+              "fill-extrusion-color": "#aaa",
+              "fill-extrusion-height": ["coalesce", ["get", "render_height"], ["get", "height"], 6],
+              "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
+              "fill-extrusion-opacity": 0.7,
+            },
+          });
+        }
+
+        if (!interactive) {
+          let bearing = -20;
+          const tick = () => { bearing += 0.015; map.setBearing(bearing % 360); requestAnimationFrame(tick); };
+          requestAnimationFrame(tick);
+        }
+      });
+
+      mapRef.current = map;
+    };
+
+    // Try immediately, then watch for the container to get real size
+    init();
+    const ro = new ResizeObserver(() => {
+      if (!mapRef.current) init();
+      else mapRef.current.resize();
     });
-    mapRef.current = map;
-    return () => { map.remove(); mapRef.current = null; };
+    ro.observe(ref.current);
+
+    return () => {
+      ro.disconnect();
+      mapRef.current?.remove();
+      mapRef.current = null;
+    };
   }, [interactive]);
 
-  return <div ref={ref} className="absolute inset-0" />;
+  // Draw flight paths when routes data arrives
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !routes?.length) return;
+
+    const layerIds: string[] = [];
+    const sourceIds: string[] = [];
+
+    const draw = () => {
+      // Clean up any previous route layers first
+      layerIds.forEach(id => { try { if (map.getLayer(id)) map.removeLayer(id); } catch {} });
+      sourceIds.forEach(id => { try { if (map.getSource(id)) map.removeSource(id); } catch {} });
+      layerIds.length = 0;
+      sourceIds.length = 0;
+
+      routes.forEach((r, i) => {
+        const pts   = buildArc(r.from, r.to);
+        const color = routeColor(r.status);
+        const srcId  = `fp-src-${i}`;
+        const glowId = `fp-glow-${i}`;
+        const lineId = `fp-line-${i}`;
+
+        map.addSource(srcId, { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: pts } } });
+        map.addLayer({ id: glowId, type: "line", source: srcId, layout: { "line-cap": "round" }, paint: { "line-color": color, "line-width": 8, "line-opacity": 0.12 } });
+        map.addLayer({ id: lineId, type: "line", source: srcId, layout: { "line-cap": "round" }, paint: { "line-color": color, "line-width": 1.5, "line-opacity": 0.75, "line-dasharray": [4, 4] } });
+
+        layerIds.push(glowId, lineId);
+        sourceIds.push(srcId);
+      });
+    };
+
+    if (map.isStyleLoaded()) draw();
+    else map.once("load", draw);
+
+    return () => {
+      const m = mapRef.current;
+      if (!m) return;
+      layerIds.forEach(id => { try { if (m.getLayer(id)) m.removeLayer(id); } catch {} });
+      sourceIds.forEach(id => { try { if (m.getSource(id)) m.removeSource(id); } catch {} });
+    };
+  }, [routes]);
+
+  return (
+    <div ref={ref} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }} />
+  );
 }
 
 // ── Main component ─────────────────────────────────────────────────────────────
@@ -173,6 +239,7 @@ export default function Dashboard() {
   const [decisions, setDecisions] = useState<{ decision: string; count: number }[]>([]);
   const [selectedFlight, setSelectedFlight] = useState<FlightRecord | null>(null);
   const [clock, setClock] = useState("");
+  const [vertiportMap, setVertiportMap] = useState<Record<string, { lat: number; lon: number }>>({});
 
   useEffect(() => {
     const tick = () => setClock(new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }));
@@ -193,7 +260,7 @@ export default function Dashboard() {
 
     const load = async () => {
       try {
-        const [intentsRes, historicalRes, decisionsRes] = await Promise.allSettled([
+        const [intentsRes, historicalRes, decisionsRes, vertiportsRes] = await Promise.allSettled([
           supabase.from("flight_intents")
             .select("id,aircraft_id,origin,destination,trajectory_score,status,weather_risk,conflicts,created_at")
             .not("status", "in", "(landed,archived)")
@@ -204,6 +271,7 @@ export default function Dashboard() {
             .order("archived_at", { ascending: false })
             .limit(30),
           supabase.from("flight_decisions").select("decision"),
+          supabase.from("vertiports").select("name,lat,lon").eq("is_active", true),
         ]);
         if (cancelled) return;
 
@@ -217,6 +285,11 @@ export default function Dashboard() {
             counts[r.decision] = (counts[r.decision] ?? 0) + 1;
           });
           setDecisions(Object.entries(counts).map(([decision, count]) => ({ decision, count: count as number })));
+        }
+        if (vertiportsRes.status === "fulfilled" && !vertiportsRes.value.error) {
+          const lookup: Record<string, { lat: number; lon: number }> = {};
+          (vertiportsRes.value.data as Vertiport[])?.forEach((v) => { lookup[v.name] = { lat: v.lat, lon: v.lon }; });
+          setVertiportMap(lookup);
         }
       } finally {
         if (!cancelled) setLoadingFlights(false);
@@ -239,6 +312,15 @@ export default function Dashboard() {
   const displayName = user?.user_metadata?.operator_name ?? user?.email?.split("@")[0] ?? "Pilot";
   const initials    = displayName.slice(0, 2).toUpperCase();
 
+  const mapRoutes = useMemo<MapRoute[]>(() => {
+    return flights.flatMap((f) => {
+      const from = vertiportMap[f.origin];
+      const to   = vertiportMap[f.destination];
+      if (!from || !to) return [];
+      return [{ from: [from.lon, from.lat] as [number, number], to: [to.lon, to.lat] as [number, number], status: f.status }];
+    });
+  }, [flights, vertiportMap]);
+
   if (authLoading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -256,11 +338,14 @@ export default function Dashboard() {
   ];
 
   return (
-    <div className="min-h-screen bg-background flex flex-col overflow-hidden">
+    <div className="h-screen bg-background flex flex-col overflow-hidden">
 
       {/* ── Top bar ── */}
       <header className="shrink-0 h-14 border-b border-border/30 bg-card/25 backdrop-blur-xl flex items-center px-4 gap-3 z-20">
-        {/* Logo wordmark */}
+        {/* Home + Logo */}
+        <Link to="/" className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors mr-1" title="Back to home">
+          <Home className="w-4 h-4" />
+        </Link>
         <span className="font-bold text-sm tracking-[0.18em] text-primary mr-2 select-none">SHNAV</span>
 
         {/* Tabs */}
@@ -328,7 +413,7 @@ export default function Dashboard() {
             >
               {/* Left: live map (60%) */}
               <div className="relative flex-[3] min-w-0">
-                <OpsMap />
+                <OpsMap routes={mapRoutes} />
                 {/* Map overlays */}
                 <div className="absolute inset-0 pointer-events-none"
                   style={{ background: "radial-gradient(ellipse at 50% 50%, transparent 40%, rgba(4,9,18,0.45) 100%)" }} />

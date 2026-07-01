@@ -2,12 +2,9 @@
 // updates the OD-pair's running outcome-adjusted score, nudges global scoring
 // weights, and updates the user's error profile for confidence calibration.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { getCorsHeaders } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
 
 interface Issue {
   type: string;
@@ -45,6 +42,7 @@ function classifyAccuracy(deltaMin: number): "accurate" | "optimistic" | "pessim
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = getCorsHeaders(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   const json = (payload: unknown, status = 200) =>

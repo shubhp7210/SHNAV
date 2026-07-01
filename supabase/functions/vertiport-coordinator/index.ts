@@ -1,9 +1,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { CORS_HEADERS, EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
+import { getCorsHeaders, EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
 import { haversineKm } from "../_shared/geo.ts";
 
-const corsHeaders = CORS_HEADERS;
 
 function matchVertiport(location: string, vertiports: any[]): any | null {
   const lower = location.toLowerCase();
@@ -27,6 +26,7 @@ function matchVertiport(location: string, vertiports: any[]): any | null {
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = getCorsHeaders(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {

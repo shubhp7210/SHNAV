@@ -1,9 +1,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { CORS_HEADERS } from "../_shared/constants.ts";
+import { getCorsHeaders } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
 import { getCoordsObj as getCoords } from "../_shared/geocode.ts";
-
-const corsHeaders = CORS_HEADERS;
+import { readBody, validateFields } from "../_shared/validate.ts";
 
 interface FlightIntent {
   aircraft_id: string;
@@ -35,6 +34,7 @@ function routesSimilar(o1: string, d1: string, o2: string, d2: string): boolean 
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = getCorsHeaders(req);
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
@@ -47,7 +47,22 @@ Deno.serve(async (req) => {
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, serviceKey);
 
-    const intent: FlightIntent = await req.json();
+    const raw = await readBody(req);
+    const validated = validateFields(raw, {
+      aircraft_id:            { required: true, type: "string", maxLength: 32, pattern: /^[A-Za-z0-9\-_]+$/ },
+      operator_name:          { required: true, type: "string", maxLength: 120 },
+      aircraft_type:          { required: true, type: "string", oneOf: ["evtol", "rotorcraft", "hybrid"] },
+      origin:                 { required: true, type: "string", maxLength: 256 },
+      destination:            { required: true, type: "string", maxLength: 256 },
+      altitude_band:          { required: true, type: "string", oneOf: ["low", "mid", "high"] },
+      departure_window_start: { required: true, type: "string", maxLength: 5, pattern: /^\d{2}:\d{2}$/ },
+      departure_window_end:   { required: true, type: "string", maxLength: 5, pattern: /^\d{2}:\d{2}$/ },
+      scheduled_departure:    { type: "string", maxLength: 64 },
+      contingency_landing:    { type: "string", maxLength: 256 },
+      max_speed:              { type: "string", maxLength: 16 },
+      max_altitude:           { type: "string", maxLength: 16 },
+    });
+    const intent = validated as unknown as FlightIntent;
 
     // Save the flight intent attributed to this user.
     const { data: savedIntent, error: saveError } = await supabase
