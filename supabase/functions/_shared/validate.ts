@@ -19,7 +19,7 @@ export async function readBody(req: Request): Promise<unknown> {
   let body: unknown;
   try {
     const text = await req.text();
-    if (text.length > MAX_BODY_BYTES) {
+    if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) {
       throw new Response(
         JSON.stringify({ error: "Request body too large" }),
         { status: 400, headers: { "Content-Type": "application/json" } },
@@ -97,16 +97,4 @@ export function validateFields(
   }
 
   return obj;
-}
-
-/** Strip any keys from an object that aren't in the allowed list. */
-export function pick<T extends Record<string, unknown>>(
-  obj: Record<string, unknown>,
-  keys: (keyof T)[],
-): Partial<T> {
-  const out: Partial<T> = {};
-  for (const k of keys) {
-    if (k in obj) (out as Record<string, unknown>)[k as string] = obj[k as string];
-  }
-  return out;
 }

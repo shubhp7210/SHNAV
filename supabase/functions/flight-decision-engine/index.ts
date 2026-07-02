@@ -15,12 +15,10 @@ function simulateShortTerm(params: {
   trajectoryScore: number;
   weatherRisk: string;
   conflicts: number;
-  weatherRiskScore: number;
   airspaceLoad: number;
-  vertiportDelay: number;
   forecast15Risk: number;
 }): SimulationResult {
-  const { trajectoryScore, weatherRisk, conflicts, weatherRiskScore, airspaceLoad, forecast15Risk } = params;
+  const { trajectoryScore, weatherRisk, conflicts, airspaceLoad, forecast15Risk } = params;
   return {
     safe: trajectoryScore >= 70 && weatherRisk !== "high",
     predicted_conflicts: conflicts,
@@ -67,7 +65,7 @@ Deno.serve(async (req: Request) => {
       if (!ownedIntent) {
         return new Response(
           JSON.stringify({ error: "Flight intent not found or access denied" }),
-          { status: 403, headers: corsHeaders },
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
     }
@@ -100,9 +98,7 @@ Deno.serve(async (req: Request) => {
       trajectoryScore: trajectory_score,
       weatherRisk: weather_risk,
       conflicts,
-      weatherRiskScore,
       airspaceLoad,
-      vertiportDelay,
       forecast15Risk,
     });
 
@@ -112,7 +108,8 @@ Deno.serve(async (req: Request) => {
     let delayMinutes = 0;
     let useRouteId: string | null = primaryRouteId;
 
-    const depTime = new Date(departure_window_start ?? new Date().toISOString());
+    const depParsed = new Date(departure_window_start ?? Date.now());
+    const depTime = Number.isFinite(depParsed.getTime()) ? depParsed : new Date();
     let departureTime = new Date(depTime.getTime() + Math.max(airspaceDelay, vertiportDelay) * 60 * 1000);
 
     if (weatherRiskScore >= 60) {
@@ -246,6 +243,9 @@ Deno.serve(async (req: Request) => {
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("[flight-decision-engine] failed", err);
-    return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: corsHeaders });
+    return new Response(JSON.stringify({ error: String(err) }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 });

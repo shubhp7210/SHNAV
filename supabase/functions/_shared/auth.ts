@@ -45,10 +45,20 @@ export async function requireUserAuth(req: Request): Promise<AuthedUser> {
  * Use in cron/system functions that must never be called by end users.
  * Set INTERNAL_FUNCTION_SECRET in Supabase Vault / project env vars.
  */
+function constantTimeEqual(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const ab = enc.encode(a);
+  const bb = enc.encode(b);
+  if (ab.length !== bb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < ab.length; i++) diff |= ab[i] ^ bb[i];
+  return diff === 0;
+}
+
 export function requireInternalSecret(req: Request): void {
   const expected = Deno.env.get("INTERNAL_FUNCTION_SECRET");
   const provided = req.headers.get("X-Internal-Secret");
-  if (!expected || provided !== expected) {
+  if (!expected || !provided || !constantTimeEqual(provided, expected)) {
     throw new Response(
       JSON.stringify({ error: "Forbidden" }),
       { status: 403, headers: { "Content-Type": "application/json" } },

@@ -66,22 +66,3 @@ export default function MobileTabBar() {
   );
 }
 
-/**
- * Spacer that the page can render once the tab bar is visible. The tab bar is
- * `position: fixed`, so any sticky content at the bottom of the document
- * (e.g. CTAs) would otherwise be obscured by it.
- *
- *   <MobileTabBarSpacer />
- *
- * Renders ~56px (tab) + safe-area-inset-bottom on mobile, nothing on desktop.
- */
-export function MobileTabBarSpacer() {
-  return (
-    <div
-      className="md:hidden h-[56px] shrink-0"
-      style={{ paddingBottom: "env(safe-area-inset-bottom, 0px)" }}
-      aria-hidden="true"
-    />
-  );
-}
-

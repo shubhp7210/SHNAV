@@ -9,7 +9,7 @@ import {
 } from "../_shared/weather.ts";
 
 
-function applyMicroWeather(lat: number, lon: number, windSpeed: number, gusts: number, temp: number) {
+function applyMicroWeather(windSpeed: number, gusts: number, temp: number) {
   return {
     adjusted_temp: temp + 2.5,
     adjusted_gusts: gusts * 1.15,
@@ -51,7 +51,7 @@ Deno.serve(async (req) => {
     const weatherCode = oc.weather_code ?? 0;
     const visibility = oc.visibility ?? 10000;
 
-    const micro = applyMicroWeather(oLat, oLon, windSpeed, gusts, temp);
+    const micro = applyMicroWeather(windSpeed, gusts, temp);
     const currentRiskScore = computeRisk(micro.adjusted_wind, micro.adjusted_gusts, precip, weatherCode);
     const currentRiskLevel = riskLevel(currentRiskScore);
     const altitudeMultiplier = altitude_band === "high" ? 1.3 : altitude_band === "mid" ? 1.15 : 1.0;
@@ -143,6 +143,9 @@ Deno.serve(async (req) => {
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
     if (err instanceof Response) return err;
-    return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: corsHeaders });
+    return new Response(JSON.stringify({ error: String(err) }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 });

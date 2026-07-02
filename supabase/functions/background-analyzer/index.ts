@@ -79,7 +79,6 @@ Deno.serve(async (req) => {
         destination_key: destKey,
         altitude_band: altBand,
         user_id: null,
-        flight_count: count,
         avg_overall_score: avg(group.overall),
         avg_safety_score: avg(group.safety),
         avg_weather_score: avg(group.weather),
@@ -90,9 +89,11 @@ Deno.serve(async (req) => {
       };
 
       if (existing) {
+        // flight_count is maintained incrementally by route-optimizer; do not
+        // overwrite it with the 30-day route count (different semantic).
         await supabase.from("route_patterns").update(upsertData).eq("id", existing.id);
       } else {
-        await supabase.from("route_patterns").insert(upsertData);
+        await supabase.from("route_patterns").insert({ ...upsertData, flight_count: count });
       }
       updatedPatterns++;
     }

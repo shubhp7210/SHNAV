@@ -1,12 +1,9 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { Plane, ArrowUpDown, Gauge, Navigation } from "lucide-react";
 import type { TrajectoryPredictorResult, FutureConflict } from "@/lib/atmTypes";
-import { resolutionCallout, trafficCallout } from "@/lib/aviation";
 
 interface Props {
   data: TrajectoryPredictorResult;
-  /** Optional: own-ship heading so we can build clock-position callouts. */
-  ownHeadingDeg?: number;
 }
 
 const SEVERITY = {
@@ -21,20 +18,13 @@ const RESOLUTION_ICON = {
   route_deviation: Navigation,
 };
 
-function ConflictRow({ c, ownHeadingDeg }: { c: FutureConflict; ownHeadingDeg?: number }) {
+function ConflictRow({ c }: { c: FutureConflict }) {
   const s = SEVERITY[c.severity];
   const ResIcon = RESOLUTION_ICON[c.resolution.type] ?? Navigation;
-  // Aviation-style resolution phrasing — overrides whatever raw text the
-  // backend sent so the UI speaks in pilot terms.
-  const resolutionText = resolutionCallout(
-    c.resolution.type as "route_deviation" | "speed_adjustment" | "altitude_adjustment",
-    ownHeadingDeg ?? 0,
-    c.severity === "high" ? 25 : c.severity === "moderate" ? 15 : 10
-  );
-  // Build a traffic callout from clock position if we have a heading.
-  const trafficText = typeof ownHeadingDeg === "number"
-    ? trafficCallout(ownHeadingDeg, (ownHeadingDeg + (c.severity === "high" ? 30 : 60)) % 360, c.separation_km)
-    : `Traffic: ${c.aircraft_a} vs ${c.aircraft_b}, ${c.separation_km} km separation`;
+  // Show the backend's concrete resolution and real separation data — the
+  // previous clock-position callout fabricated a bearing from severity.
+  const resolutionText = c.resolution.action;
+  const trafficText = `Traffic: ${c.aircraft_a} vs ${c.aircraft_b}, ${c.separation_km} km separation`;
 
   return (
     <motion.div
@@ -62,7 +52,7 @@ function ConflictRow({ c, ownHeadingDeg }: { c: FutureConflict; ownHeadingDeg?: 
   );
 }
 
-export default function TrajectoryConflictAlert({ data, ownHeadingDeg }: Props) {
+export default function TrajectoryConflictAlert({ data }: Props) {
   const hasConflicts = data.future_conflicts.length > 0;
 
   return (
@@ -103,7 +93,7 @@ export default function TrajectoryConflictAlert({ data, ownHeadingDeg }: Props) 
           {hasConflicts ? (
             <div className="space-y-2">
               {data.future_conflicts.slice(0, 4).map((c, i) => (
-                <ConflictRow key={i} c={c} ownHeadingDeg={ownHeadingDeg} />
+                <ConflictRow key={i} c={c} />
               ))}
             </div>
           ) : (

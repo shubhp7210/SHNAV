@@ -27,7 +27,7 @@ Deno.serve(async (req) => {
     // Fetch only this user's active flights — never expose other operators' data.
     const { data: activeFlights } = await supabase
       .from("flight_intents")
-      .select("id, aircraft_id, origin, destination, altitude_band, departure_window_start, departure_window_end, status")
+      .select("id, aircraft_id, origin, destination, altitude_band, departure_window_start, departure_window_end, scheduled_departure, created_at, status")
       .in("status", ["active", "approved", "pending"])
       .eq("user_id", user.id)
       .limit(50);
@@ -35,12 +35,24 @@ Deno.serve(async (req) => {
     const flights = activeFlights ?? [];
     const now = Date.now();
 
+    // departure_window_start is a TEXT "HH:MM" column — it is NOT parseable by
+    // new Date(). Use the real timestamps we have: scheduled_departure when the
+    // client provided one, otherwise fall back to created_at.
+    const departureMs = (f: { scheduled_departure?: string | null; created_at?: string | null }): number => {
+      for (const raw of [f.scheduled_departure, f.created_at]) {
+        if (!raw) continue;
+        const t = new Date(raw).getTime();
+        if (Number.isFinite(t)) return t;
+      }
+      return now;
+    };
+
     const predictions = await Promise.all(flights.map(async (f: any) => {
       const [oLat, oLon] = await getCoords(f.origin ?? "");
       const [dLat, dLon] = await getCoords(f.destination ?? "");
-      const depStart = new Date(f.departure_window_start).getTime();
+      const depStart = departureMs(f);
       const totalDistKm = haversineKm(oLat, oLon, dLat, dLon);
-      const totalDurationMs = (totalDistKm / EVTOL_SPEED_KMH) * 3600 * 1000;
+      const totalDurationMs = Math.max(1, (totalDistKm / EVTOL_SPEED_KMH) * 3600 * 1000);
       const elapsed = Math.max(0, now - depStart);
       const progress = Math.min(1, elapsed / totalDurationMs);
 
@@ -133,6 +145,9 @@ Deno.serve(async (req) => {
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
     if (err instanceof Response) return err;
-    return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: corsHeaders });
+    return new Response(JSON.stringify({ error: String(err) }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 });

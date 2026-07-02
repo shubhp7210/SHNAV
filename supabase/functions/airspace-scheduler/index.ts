@@ -9,6 +9,13 @@ function getPriority(aircraftType: string, isEmergency: boolean): number {
   return 40;
 }
 
+/** Extract minutes-of-day from either "HH:MM" or a full datetime string. */
+function minutesOfDay(v: string | null | undefined): number | null {
+  const m = v?.match(/(\d{2}):(\d{2})/);
+  if (!m) return null;
+  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+}
+
 Deno.serve(async (req) => {
   const corsHeaders = getCorsHeaders(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -44,14 +51,18 @@ Deno.serve(async (req) => {
       if (!ownedIntent) {
         return new Response(
           JSON.stringify({ error: "Flight intent not found or access denied" }),
-          { status: 403, headers: corsHeaders },
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
     }
 
     const priority = getPriority(aircraft_type, is_emergency);
-    const windowStart = new Date(departure_window_start);
-    const windowEnd = new Date(departure_window_end);
+    const windowStartParsed = new Date(departure_window_start);
+    const windowStart = Number.isFinite(windowStartParsed.getTime()) ? windowStartParsed : new Date();
+    const windowEndParsed = new Date(departure_window_end);
+    const windowEnd = Number.isFinite(windowEndParsed.getTime())
+      ? windowEndParsed
+      : new Date(windowStart.getTime() + 10 * 60 * 1000);
 
     const { data: segments } = await supabase
       .from("airspace_segments")
@@ -65,26 +76,36 @@ Deno.serve(async (req) => {
     const capacityPerHour = segment?.capacity_per_hour ?? 8;
 
     // Count fleet-wide flights in this window — needed for true capacity check.
-    const hourAgo = new Date(windowStart.getTime() - 60 * 60 * 1000).toISOString();
-    const hourAhead = new Date(windowEnd.getTime() + 60 * 60 * 1000).toISOString();
-
-    const { data: overlapping } = await supabase
+    // departure_window_start/end are TEXT "HH:MM" columns; comparing them to
+    // ISO timestamps in SQL silently matched nothing, so overlap is computed
+    // here on minutes-of-day with a ±60 min buffer.
+    const { data: candidates } = await supabase
       .from("flight_intents")
       .select("id, departure_window_start, departure_window_end, aircraft_type")
       .in("status", ["analyzing", "pending", "approved", "active"])
-      .gte("departure_window_end", hourAgo)
-      .lte("departure_window_start", hourAhead)
       .eq("altitude_band", altitude_band)
-      .neq("id", flight_intent_id ?? "00000000-0000-0000-0000-000000000000");
+      .neq("id", flight_intent_id ?? "00000000-0000-0000-0000-000000000000")
+      .limit(200);
 
-    const competingFlights = overlapping ?? [];
+    const reqStartMin = minutesOfDay(departure_window_start) ?? windowStart.getHours() * 60 + windowStart.getMinutes();
+    const reqEndMin = minutesOfDay(departure_window_end) ?? reqStartMin + 10;
+    const bufStart = reqStartMin - 60;
+    const bufEnd = reqEndMin + 60;
+    const overlapsRequest = (f: { departure_window_start?: string; departure_window_end?: string }): boolean => {
+      const s = minutesOfDay(f.departure_window_start);
+      const e = minutesOfDay(f.departure_window_end);
+      if (s == null || e == null) return false;
+      return s < bufEnd && e > bufStart;
+    };
+
+    const competingFlights = (candidates ?? []).filter(overlapsRequest);
     const slotWindowHours = (windowEnd.getTime() - windowStart.getTime()) / (1000 * 60 * 60);
     const capacityInWindow = Math.ceil(capacityPerHour * Math.max(slotWindowHours, 0.25));
     const currentLoad = competingFlights.length;
     const loadPct = Math.round((currentLoad / capacityPerHour) * 100);
     const capacityAvailable = currentLoad < capacityInWindow;
 
-    let allocatedTime = departure_window_start;
+    let allocatedTime = windowStart.toISOString();
     let delayMinutes = 0;
     let allocated = true;
     let reason = "";
@@ -96,16 +117,17 @@ Deno.serve(async (req) => {
       allocatedTime = nextSlot.toISOString();
       reason = `Airspace segment at ${loadPct}% capacity. Next available slot in ${delayMinutes} minutes.`;
 
-      const delayedEnd = new Date(nextSlot.getTime() + 15 * 60 * 1000).toISOString();
-      const { data: delayedOverlap } = await supabase
-        .from("flight_intents")
-        .select("id")
-        .in("status", ["analyzing", "pending", "approved", "active"])
-        .gte("departure_window_end", nextSlot.toISOString())
-        .lte("departure_window_start", delayedEnd)
-        .eq("altitude_band", altitude_band);
+      // Re-check load in the delayed window (same minutes-of-day logic).
+      const delayedStartMin = reqStartMin + delayMinutes;
+      const delayedEndMin = delayedStartMin + 15;
+      const delayedOverlap = (candidates ?? []).filter((f) => {
+        const s = minutesOfDay(f.departure_window_start);
+        const e = minutesOfDay(f.departure_window_end);
+        if (s == null || e == null) return false;
+        return s < delayedEndMin && e > delayedStartMin;
+      });
 
-      if ((delayedOverlap ?? []).length < capacityPerHour) {
+      if (delayedOverlap.length < capacityPerHour) {
         allocated = true;
         reason = `Allocated to next available slot (+${delayMinutes} min) due to capacity.`;
       } else {
@@ -150,6 +172,9 @@ Deno.serve(async (req) => {
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
     if (err instanceof Response) return err;
-    return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: corsHeaders });
+    return new Response(JSON.stringify({ error: String(err) }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 });

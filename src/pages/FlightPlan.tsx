@@ -12,7 +12,6 @@ import {
   Plane,
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import type { Json } from "@/integrations/supabase/types";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import type { RouteOptimizerResult } from "@/lib/routeTypes";
@@ -342,11 +341,9 @@ const FlightPlan = () => {
     }
     setCompletedSteps((prev) => new Set([...prev, currentStep]));
 
-    // Leaving Clearance → Monitoring: persist the chosen route as a learning sample.
-    // (Previously done on Authority approve, but that step is gone.)
-    if (currentStep === 2) {
-      void persistRoutePattern();
-    }
+    // Route-pattern learning happens server-side (route-optimizer upserts
+    // patterns; record-flight-outcome adjusts them on landing). Client-side
+    // writes to route_patterns are blocked by RLS.
 
     // Trigger all engines when leaving Intent step
     if (currentStep === 1) {
@@ -449,51 +446,6 @@ const FlightPlan = () => {
     if (currentStep > 0) setCurrentStep(currentStep - 1);
   };
 
-  // Persist completed route to historical patterns so future flights learn from it
-  const persistRoutePattern = async () => {
-    const route = data.routeData?.primary_route;
-    if (!route || !data.origin || !data.destination) return;
-    const originKey = data.origin.toLowerCase().split("@")[0].trim();
-    const destKey = data.destination.toLowerCase().split("@")[0].trim();
-    try {
-      const { data: existing } = await supabase
-        .from("route_patterns")
-        .select("*")
-        .eq("origin_key", originKey)
-        .eq("destination_key", destKey)
-        .eq("altitude_band", data.altitudeBand)
-        .maybeSingle();
-      if (existing) {
-        const n = (existing.flight_count ?? 0) + 1;
-        const avg = (prev: number, next: number) => (prev * (n - 1) + next) / n;
-        await supabase.from("route_patterns").update({
-          flight_count: n,
-          avg_overall_score: avg(Number(existing.avg_overall_score) || 0, route.overall_score),
-          avg_safety_score: avg(Number(existing.avg_safety_score) || 0, route.safety_score),
-          avg_weather_score: avg(Number(existing.avg_weather_score) || 0, route.weather_score),
-          avg_traffic_score: avg(Number(existing.avg_traffic_score) || 0, route.traffic_score),
-          avg_efficiency_score: avg(Number(existing.avg_efficiency_score) || 0, route.efficiency_score),
-          preferred_waypoints: route.waypoints as unknown as Json,
-          last_updated: new Date().toISOString(),
-        }).eq("id", existing.id);
-      } else {
-        await supabase.from("route_patterns").insert([{
-          origin_key: originKey, destination_key: destKey, altitude_band: data.altitudeBand,
-          flight_count: 1,
-          avg_overall_score: route.overall_score, avg_safety_score: route.safety_score,
-          avg_weather_score: route.weather_score, avg_traffic_score: route.traffic_score,
-          avg_efficiency_score: route.efficiency_score,
-          preferred_waypoints: route.waypoints as unknown as Json,
-        }]);
-      }
-      console.info("[learning] route_patterns updated for", originKey, "→", destKey);
-    } catch (err) {
-      console.warn("[learning] persistRoutePattern failed", err);
-    }
-  };
-
-  // Authority Review step removed — decision engine output is the source of
-  // truth. Persist learning data on transition from Clearance → Monitoring.
   const monitoringFallback = (
     <div className="py-12 flex flex-col items-center gap-3 text-center">
       <div className="w-8 h-8 rounded-full border-2 border-primary/30 border-t-primary animate-spin" />

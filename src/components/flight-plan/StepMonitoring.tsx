@@ -456,25 +456,68 @@ const StepMonitoring = ({ data, updateData }: Props) => {
   }, [mapReady, data.aircraftId, data.flightIntentId]);
 
   // ── Flight lifecycle ──────────────────────────────────────────────────────
+  // Supabase query builders are lazy — they only execute when awaited, so
+  // these updates must live inside an async call, not as bare statements.
   useEffect(() => {
     if (!data.monitoringActive || !data.flightIntentId) return;
-    supabase.from("flight_intents").update({ status: "in_air" }).eq("id", data.flightIntentId);
+    void (async () => {
+      const { error } = await supabase
+        .from("flight_intents")
+        .update({ status: "in_air" })
+        .eq("id", data.flightIntentId!);
+      if (error) console.warn("[flight] in_air update failed", error.message);
+    })();
   }, [data.monitoringActive, data.flightIntentId]);
 
   const landedRef = useRef(false);
   useEffect(() => {
     if (landedRef.current || progress < 1 || !data.flightIntentId) return;
     landedRef.current = true;
-    supabase.from("flight_intents")
-      .update({ status: "landed", landed_at: new Date().toISOString() })
-      .eq("id", data.flightIntentId);
-  }, [progress, data.flightIntentId]);
+    const intentId = data.flightIntentId;
+    const landedAt = new Date().toISOString();
+    void (async () => {
+      // record-flight-outcome marks the flight landed server-side and feeds
+      // the learning loop (patterns, weights, user error profile).
+      const decision = data.atmEngines.flightDecision;
+      const plannedMin = data.routeData?.primary_route?.estimated_time_min ?? null;
+      const { error } = await supabase.functions.invoke("record-flight-outcome", {
+        body: {
+          flight_intent_id: intentId,
+          aircraft_id: data.aircraftId || "UNKNOWN",
+          route_id: data.routeData?.route_id ?? null,
+          decision_id: decision?.decision_id ?? null,
+          planned_departure_time: decision?.departure_time ?? null,
+          actual_arrival_time: landedAt,
+          planned_duration_minutes: plannedMin,
+          actual_duration_minutes: plannedMin ?? 0,
+          delay_minutes: decision?.delay_minutes ?? 0,
+          predicted_overall_score: data.routeData?.primary_route?.overall_score ?? null,
+          predicted_weather_risk: data.weatherRisk || null,
+          completion_status: "completed",
+        },
+      });
+      if (error) {
+        console.warn("[flight] record-flight-outcome failed, marking landed directly", error.message);
+        const { error: updateErr } = await supabase
+          .from("flight_intents")
+          .update({ status: "landed", landed_at: landedAt })
+          .eq("id", intentId);
+        if (updateErr) console.warn("[flight] landed update failed", updateErr.message);
+      }
+    })();
+  }, [progress, data.flightIntentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (progress < 1) return;
     const t = setTimeout(() => setCompleted(true), 1500);
     return () => clearTimeout(t);
   }, [progress]);
+
+  // Tear down the Web Audio context on unmount — it is otherwise leaked.
+  useEffect(() => () => {
+    audioRef.current?.destroy();
+    audioRef.current = null;
+  }, []);
 
   // ── Completion screen ─────────────────────────────────────────────────────
   if (completed) {

@@ -48,8 +48,7 @@ export default defineConfig(({ mode }) => ({
           if (
             id.includes("node_modules/react/") ||
             id.includes("node_modules/react-dom/") ||
-            id.includes("node_modules/react-router-dom/") ||
-            id.includes("node_modules/@tanstack/react-query")
+            id.includes("node_modules/react-router-dom/")
           ) {
             return "vendor-react";
           }

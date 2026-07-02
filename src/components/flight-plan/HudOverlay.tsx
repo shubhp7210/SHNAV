@@ -1,11 +1,12 @@
 import { Wind, Eye, Crosshair, Compass } from "lucide-react";
+import { kmhToKnots } from "@/lib/aviation";
 
 export type PovMode = "fpv" | "tac" | "hyb";
 
 interface HudOverlayProps {
   heading: number;             // 0–360 degrees, magnetic
   speedKmh: number;
-  windSpeed: number | null;    // any unit; displayed as "kt"
+  windSpeed: number | null;    // km/h; converted to knots for display
   povMode: PovMode;
   autoPov: boolean;
   onPovChange: (m: PovMode) => void;
@@ -98,7 +99,7 @@ export default function HudOverlay({
                           bg-black/55 border border-white/10 backdrop-blur-md">
             <Wind className="w-3 h-3 text-cyan-300" />
             <span className="font-mono text-[11px] text-white/80 tabular-nums">
-              {Math.round(windSpeed)} kt
+              {Math.round(kmhToKnots(windSpeed))} kt
             </span>
           </div>
         </div>

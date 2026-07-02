@@ -44,9 +44,3 @@ export function getCorsHeaders(req: Request): Record<string, string> {
     ...(allowed.length > 0 ? { "Vary": "Origin" } : {}),
   };
 }
-
-/** @deprecated Use getCorsHeaders(req) for origin-aware CORS. */
-export const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": SHARED_ALLOW_HEADERS,
-};

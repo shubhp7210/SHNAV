@@ -90,13 +90,29 @@ Deno.serve(async (req) => {
     // Ownership check — prevent users from marking other operators' flights as landed.
     const { data: ownedIntent } = await supabase
       .from("flight_intents")
-      .select("id, origin, destination")
+      .select("id, origin, destination, altitude_band")
       .eq("id", flight_intent_id)
       .eq("user_id", user.id)
       .single();
 
     if (!ownedIntent) {
       return json({ error: "Flight intent not found or access denied" }, 403);
+    }
+
+    // Replay guard — an outcome is recorded once. Without this, re-POSTing the
+    // same flight inflates pattern counts, user-profile totals, and the weight
+    // self-correction on every call.
+    const { data: existingOutcome } = await supabase
+      .from("flight_outcomes")
+      .select("id, decision_accuracy")
+      .eq("flight_intent_id", flight_intent_id)
+      .maybeSingle();
+    if (existingOutcome) {
+      return json({
+        outcome_id: existingOutcome.id,
+        decision_accuracy: existingOutcome.decision_accuracy,
+        already_recorded: true,
+      });
     }
 
     const durationDelta = planned_duration_minutes != null
@@ -148,6 +164,7 @@ Deno.serve(async (req) => {
     // ── 3. Update OD pattern's outcome-adjusted score ─────────────────────
     const originKey = ownedIntent.origin.toLowerCase().split("@")[0].trim();
     const destKey = ownedIntent.destination.toLowerCase().split("@")[0].trim();
+    const band = ownedIntent.altitude_band ?? "low";
 
     let patternAdjustment = 0;
     let predictionError = 0;
@@ -157,6 +174,7 @@ Deno.serve(async (req) => {
       .select("*")
       .eq("origin_key", originKey)
       .eq("destination_key", destKey)
+      .eq("altitude_band", band)
       .is("user_id", null)
       .maybeSingle();
 
@@ -203,6 +221,7 @@ Deno.serve(async (req) => {
       .select("*")
       .eq("origin_key", originKey)
       .eq("destination_key", destKey)
+      .eq("altitude_band", band)
       .eq("user_id", user.id)
       .maybeSingle();
 
@@ -336,6 +355,9 @@ Deno.serve(async (req) => {
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("[record-flight-outcome] unhandled", err);
-    return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: corsHeaders });
+    return new Response(JSON.stringify({ error: String(err) }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 });

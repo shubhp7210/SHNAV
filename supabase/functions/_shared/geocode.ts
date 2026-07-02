@@ -11,9 +11,10 @@ import { DEFAULT_COORDS } from "./constants.ts";
 import type { LatLon } from "./geo.ts";
 
 // Merged from the four prior tables (route-optimizer / trajectory-analysis /
-// trajectory-predictor / weather-intelligence). Keys are matched as substrings
-// against the lowercased input, so longer keys must precede shorter aliases
-// when both could match.
+// trajectory-predictor / weather-intelligence). Exact input matches win first;
+// keys of 3+ chars are then matched on word boundaries. Two-letter aliases
+// ("la", "sf") only match exactly — substring matching made "Orlando" resolve
+// to Los Angeles.
 const CITY_COORDS: Record<string, LatLon> = {
   // North America
   "new york":      [40.7128,  -74.006],
@@ -34,8 +35,7 @@ const CITY_COORDS: Record<string, LatLon> = {
   "dallas":        [32.7767,  -96.797],
   "atlanta":       [33.749,   -84.388],
   "denver":        [39.7392, -104.9903],
-  // Common 2-letter aliases — kept last so longer city names win the substring
-  // race when both appear (e.g. "Los Angeles" before "la").
+  // Two-letter aliases — exact-match only (see getCoords).
   "la":            [34.0522, -118.2437],
   "sf":            [37.7749, -122.4194],
   // International
@@ -72,10 +72,14 @@ export async function getCoords(location: string): Promise<LatLon> {
   if (parsed) return parsed;
 
   const key = location.toLowerCase().trim();
-  // Longest key first so "los angeles" wins over "la".
-  const keys = Object.keys(CITY_COORDS).sort((a, b) => b.length - a.length);
+  if (CITY_COORDS[key]) return CITY_COORDS[key];
+  // Word-boundary match, longest key first so "los angeles" wins over "jfk".
+  // Short aliases (<3 chars) are exact-match only, handled above.
+  const keys = Object.keys(CITY_COORDS)
+    .filter((k) => k.length >= 3)
+    .sort((a, b) => b.length - a.length);
   for (const k of keys) {
-    if (key.includes(k)) return CITY_COORDS[k];
+    if (new RegExp(`(^|[^a-z])${k}([^a-z]|$)`).test(key)) return CITY_COORDS[k];
   }
 
   try {

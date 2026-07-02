@@ -88,6 +88,15 @@ function routeColor(status: string): string {
   return "#fbbf24";
 }
 
+/** Origins/destinations picked via location search carry "name @ lat,lon". */
+function parseTaggedCoords(loc: string): { lat: number; lon: number } | null {
+  const m = loc?.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
+  if (!m) return null;
+  const lat = parseFloat(m[1]);
+  const lon = parseFloat(m[2]);
+  return Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null;
+}
+
 function ScoreRing({ score, size = 44 }: { score: number; size?: number }) {
   const r = size / 2 - 5;
   const circ = 2 * Math.PI * r;
@@ -110,12 +119,17 @@ function ScoreRing({ score, size = 44 }: { score: number; size?: number }) {
 function OpsMap({ interactive = false, routes }: { interactive?: boolean; routes?: MapRoute[] }) {
   const ref = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  // Also held in state so the route-drawing effect re-runs once the map is
+  // ready — init can happen after routes arrive (ResizeObserver defers it).
+  const [mapInstance, setMapInstance] = useState<maplibregl.Map | null>(null);
 
   useEffect(() => {
     if (!ref.current) return;
+    let disposed = false;
+    let rotationRaf: number | null = null;
 
     const init = () => {
-      if (!ref.current || mapRef.current) return;
+      if (!ref.current || mapRef.current || disposed) return;
       const { width, height } = ref.current.getBoundingClientRect();
       if (width === 0 || height === 0) return; // wait for real dimensions
 
@@ -154,12 +168,18 @@ function OpsMap({ interactive = false, routes }: { interactive?: boolean; routes
 
         if (!interactive) {
           let bearing = -20;
-          const tick = () => { bearing += 0.015; map.setBearing(bearing % 360); requestAnimationFrame(tick); };
-          requestAnimationFrame(tick);
+          const tick = () => {
+            if (disposed) return;
+            bearing += 0.015;
+            map.setBearing(bearing % 360);
+            rotationRaf = requestAnimationFrame(tick);
+          };
+          rotationRaf = requestAnimationFrame(tick);
         }
       });
 
       mapRef.current = map;
+      setMapInstance(map);
     };
 
     // Try immediately, then watch for the container to get real size
@@ -171,15 +191,18 @@ function OpsMap({ interactive = false, routes }: { interactive?: boolean; routes
     ro.observe(ref.current);
 
     return () => {
+      disposed = true;
+      if (rotationRaf !== null) cancelAnimationFrame(rotationRaf);
       ro.disconnect();
       mapRef.current?.remove();
       mapRef.current = null;
+      setMapInstance(null);
     };
   }, [interactive]);
 
-  // Draw flight paths when routes data arrives
+  // Draw flight paths when routes data arrives (or when the map becomes ready)
   useEffect(() => {
-    const map = mapRef.current;
+    const map = mapInstance;
     if (!map || !routes?.length) return;
 
     const layerIds: string[] = [];
@@ -212,12 +235,12 @@ function OpsMap({ interactive = false, routes }: { interactive?: boolean; routes
     else map.once("load", draw);
 
     return () => {
-      const m = mapRef.current;
-      if (!m) return;
-      layerIds.forEach(id => { try { if (m.getLayer(id)) m.removeLayer(id); } catch {} });
-      sourceIds.forEach(id => { try { if (m.getSource(id)) m.removeSource(id); } catch {} });
+      map.off("load", draw);
+      if (mapRef.current !== map) return; // map already removed
+      layerIds.forEach(id => { try { if (map.getLayer(id)) map.removeLayer(id); } catch {} });
+      sourceIds.forEach(id => { try { if (map.getSource(id)) map.removeSource(id); } catch {} });
     };
-  }, [routes]);
+  }, [routes, mapInstance]);
 
   return (
     <div ref={ref} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }} />
@@ -242,7 +265,8 @@ export default function Dashboard() {
   const [vertiportMap, setVertiportMap] = useState<Record<string, { lat: number; lon: number }>>({});
 
   useEffect(() => {
-    const tick = () => setClock(new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }));
+    // Displayed with a "UTC" label — format in UTC, not local time.
+    const tick = () => setClock(new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "UTC" }));
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
@@ -314,8 +338,10 @@ export default function Dashboard() {
 
   const mapRoutes = useMemo<MapRoute[]>(() => {
     return flights.flatMap((f) => {
-      const from = vertiportMap[f.origin];
-      const to   = vertiportMap[f.destination];
+      // Prefer the coordinates embedded in geocoded locations; exact
+      // vertiport-name match is only a fallback (origins are free text).
+      const from = parseTaggedCoords(f.origin) ?? vertiportMap[f.origin];
+      const to   = parseTaggedCoords(f.destination) ?? vertiportMap[f.destination];
       if (!from || !to) return [];
       return [{ from: [from.lon, from.lat] as [number, number], to: [to.lon, to.lat] as [number, number], status: f.status }];
     });

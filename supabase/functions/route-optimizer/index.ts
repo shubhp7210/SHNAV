@@ -98,9 +98,9 @@ function routeIntersectsNoFly(
   waypoints: LatLon[],
   noFlyZones: Array<{ name: string; boundary_polygon: PolyPoint[] }>,
 ): string | null {
+  const samplePts = samplePointsAlongRoute(waypoints, 12);
   for (const zone of noFlyZones) {
     if (!zone.boundary_polygon || zone.boundary_polygon.length < 3) continue;
-    const samplePts = samplePointsAlongRoute(waypoints, 12);
     for (const [lat, lon] of samplePts) {
       if (pointInPolygon(lat, lon, zone.boundary_polygon)) {
         return zone.name;
@@ -124,6 +124,7 @@ interface RouteEval {
   maxTurbulence: number;
   avgIcing: number;
   avgVisibilityM: number;
+  minVisibilityM: number;
   worstWeatherCode: number;
   trafficPenalty: number;
 }
@@ -143,7 +144,7 @@ async function evaluateRoute(
     bearings.push(bearingDeg(waypoints[i - 1][0], waypoints[i - 1][1], waypoints[i][0], waypoints[i][1]));
   }
 
-  let sumHead = 0, sumCross = 0, sumWxSev = 0, maxWxSev = 0, sumTurb = 0, maxTurb = 0, sumIcing = 0, sumVis = 0, worstWxCode = 0;
+  let sumHead = 0, sumCross = 0, sumWxSev = 0, maxWxSev = 0, sumTurb = 0, maxTurb = 0, sumIcing = 0, sumVis = 0, minVis = Infinity, worstWxCode = 0;
   for (let i = 0; i < wxList.length; i++) {
     const wx = wxList[i];
     const t = i / Math.max(1, wxList.length - 1);
@@ -160,6 +161,7 @@ async function evaluateRoute(
     if (turb > maxTurb) maxTurb = turb;
     sumIcing += icingFromWeather(wx);
     sumVis += wx.visibilityM;
+    if (wx.visibilityM < minVis) minVis = wx.visibilityM;
     if (wx.weatherCode > worstWxCode) worstWxCode = wx.weatherCode;
   }
   const n = Math.max(1, wxList.length);
@@ -177,6 +179,7 @@ async function evaluateRoute(
     maxTurbulence: maxTurb,
     avgIcing: sumIcing / n,
     avgVisibilityM: sumVis / n,
+    minVisibilityM: Number.isFinite(minVis) ? minVis : 10000,
     worstWeatherCode: worstWxCode,
     trafficPenalty: conflictDensity,
   };
@@ -289,9 +292,10 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const { aircraft_id, operator_name, origin, destination, altitude_band, departure_window_start, departure_window_end, flight_intent_id } = body;
 
-    if (!origin || !destination) {
+    if (typeof origin !== "string" || !origin.trim() || typeof destination !== "string" || !destination.trim()) {
       return json({ error: "origin and destination are required" }, 400);
     }
+    const band = typeof altitude_band === "string" && altitude_band ? altitude_band : "low";
 
     // Ownership check when flight_intent_id is provided.
     if (flight_intent_id) {
@@ -324,10 +328,19 @@ Deno.serve(async (req) => {
 
     const conflicts: ConflictEntry[] = [];
     let conflictDensity = 0;
-    for (const intent of existingIntents ?? []) {
-      if (!windowsOverlap(departure_window_start ?? "00:00", departure_window_end ?? "23:59", intent.departure_window_start, intent.departure_window_end)) continue;
-      const iOrigin = await getCoords(intent.origin);
-      const iDest = await getCoords(intent.destination);
+    // Geocode all overlapping intents in parallel — the previous serial loop
+    // could issue up to 200 Nominatim round-trips back to back.
+    const overlappingIntents = (existingIntents ?? []).filter((intent) =>
+      windowsOverlap(departure_window_start ?? "00:00", departure_window_end ?? "23:59", intent.departure_window_start, intent.departure_window_end),
+    );
+    const intentCoords = await Promise.all(
+      overlappingIntents.map(async (intent) => ({
+        intent,
+        origin: await getCoords(intent.origin),
+        dest: await getCoords(intent.destination),
+      })),
+    );
+    for (const { intent, origin: iOrigin, dest: iDest } of intentCoords) {
       const nearOrigin = haversine(originCoords[0], originCoords[1], iOrigin[0], iOrigin[1]) < 20;
       const nearDest = haversine(destCoords[0], destCoords[1], iDest[0], iDest[1]) < 20;
       if (!nearOrigin && !nearDest) continue;
@@ -373,17 +386,21 @@ Deno.serve(async (req) => {
     const originKey = origin.toLowerCase().split("@")[0].trim();
     const destKey = destination.toLowerCase().split("@")[0].trim();
 
+    // altitude_band is part of the unique key on route_patterns — omitting it
+    // makes maybeSingle() error once the same OD pair exists at two bands.
     let pattern = null;
     const { data: userPattern } = await supabase
       .from("route_patterns").select("*")
-      .eq("origin_key", originKey).eq("destination_key", destKey).eq("user_id", user.id)
+      .eq("origin_key", originKey).eq("destination_key", destKey)
+      .eq("altitude_band", band).eq("user_id", user.id)
       .maybeSingle();
     pattern = userPattern;
 
     if (!pattern) {
       const { data: fleetPattern } = await supabase
         .from("route_patterns").select("*")
-        .eq("origin_key", originKey).eq("destination_key", destKey).is("user_id", null)
+        .eq("origin_key", originKey).eq("destination_key", destKey)
+        .eq("altitude_band", band).is("user_id", null)
         .maybeSingle();
       pattern = fleetPattern;
     }
@@ -459,7 +476,7 @@ Deno.serve(async (req) => {
         turbulence_probability: Math.round(s.evaluation.maxTurbulence * 100),
         icing_probability: Math.round(s.evaluation.avgIcing * 100),
         worst_weather_code: s.evaluation.worstWeatherCode,
-        min_visibility_m: Math.round(s.evaluation.avgVisibilityM),
+        min_visibility_m: Math.round(s.evaluation.minVisibilityM),
       },
       operational_note: buildOperationalNote(s),
       is_selected: false,
@@ -474,7 +491,7 @@ Deno.serve(async (req) => {
     const weatherRisk: "low" | "moderate" | "high" =
       overallWxSeverity >= 0.5 ? "high" : overallWxSeverity >= 0.25 ? "moderate" : "low";
 
-    const { data: savedRoute } = await supabase
+    const { data: savedRoute, error: routeSaveErr } = await supabase
       .from("routes")
       .insert({
         flight_intent_id: flight_intent_id ?? null,
@@ -482,7 +499,7 @@ Deno.serve(async (req) => {
         operator_name,
         origin,
         destination,
-        altitude_band,
+        altitude_band: band,
         primary_route: primaryRoute,
         alternate_routes: alternateRoutes,
         overall_score: primaryRoute.overall_score,
@@ -506,6 +523,9 @@ Deno.serve(async (req) => {
       })
       .select("id")
       .single();
+    if (routeSaveErr) {
+      console.error("[route-optimizer] routes insert failed", routeSaveErr.message);
+    }
 
     // ── 9. Upsert both user-specific and fleet route_patterns ────────────
     const patternUpsert = async (uid: string | null, existing: any) => {
@@ -515,7 +535,7 @@ Deno.serve(async (req) => {
       const data = {
         origin_key: originKey,
         destination_key: destKey,
-        altitude_band,
+        altitude_band: band,
         user_id: uid,
         flight_count: n,
         avg_overall_score: blend(existing?.avg_overall_score, primaryRoute.overall_score),
@@ -526,10 +546,11 @@ Deno.serve(async (req) => {
         preferred_waypoints: primaryRoute.waypoints,
         last_updated: new Date().toISOString(),
       };
-      if (existing) {
-        await supabase.from("route_patterns").update(data).eq("id", existing.id);
-      } else {
-        await supabase.from("route_patterns").insert({ ...data, flight_count: 1 });
+      const { error: upsertErr } = existing
+        ? await supabase.from("route_patterns").update(data).eq("id", existing.id)
+        : await supabase.from("route_patterns").insert({ ...data, flight_count: 1 });
+      if (upsertErr) {
+        console.error("[route-optimizer] route_patterns upsert failed", { uid, originKey, destKey, band, error: upsertErr.message });
       }
     };
 
@@ -537,7 +558,8 @@ Deno.serve(async (req) => {
 
     const { data: fleetPattern } = await supabase
       .from("route_patterns").select("*")
-      .eq("origin_key", originKey).eq("destination_key", destKey).is("user_id", null)
+      .eq("origin_key", originKey).eq("destination_key", destKey)
+      .eq("altitude_band", band).is("user_id", null)
       .maybeSingle();
     await patternUpsert(null, fleetPattern ?? null);
 

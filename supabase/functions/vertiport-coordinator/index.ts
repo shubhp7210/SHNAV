@@ -56,12 +56,13 @@ Deno.serve(async (req) => {
       if (!ownedIntent) {
         return new Response(
           JSON.stringify({ error: "Flight intent not found or access denied" }),
-          { status: 403, headers: corsHeaders },
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
     }
 
-    const depTime = new Date(departure_time ?? new Date().toISOString());
+    const depParsed = new Date(departure_time ?? Date.now());
+    const depTime = Number.isFinite(depParsed.getTime()) ? depParsed : new Date();
     const windowStart = new Date(depTime.getTime() - 30 * 60 * 1000).toISOString();
     const windowEnd = new Date(depTime.getTime() + 30 * 60 * 1000).toISOString();
 
@@ -105,7 +106,9 @@ Deno.serve(async (req) => {
     const arrCapacityOk = arrCount < maxArr;
 
     let departureDelay = 0;
-    let adjustedDepartureTime = departure_time;
+    // Always an ISO string — the raw departure_time input may be missing or
+    // unparseable, and this value is fed to new Date(...).toISOString() below.
+    let adjustedDepartureTime = depTime.toISOString();
     let reason = "";
 
     if (!depCapacityOk && !arrCapacityOk) {
@@ -174,6 +177,9 @@ Deno.serve(async (req) => {
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
     if (err instanceof Response) return err;
-    return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: corsHeaders });
+    return new Response(JSON.stringify({ error: String(err) }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 });
