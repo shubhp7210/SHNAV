@@ -20,7 +20,7 @@ export default function AirspaceSchedulePanel({ schedule }: Props) {
       <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
         <span className="text-xs font-semibold text-white/60 uppercase tracking-widest">Airspace Schedule</span>
         <span className={`text-xs font-bold ${schedule.allocated ? "text-emerald-400" : "text-amber-400"}`}>
-          {schedule.allocated ? "SLOT ALLOCATED" : "DELAYED"}
+          {schedule.allocated ? "SLOT RESERVED" : "DELAYED"}
         </span>
       </div>
 

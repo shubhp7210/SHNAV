@@ -18,6 +18,7 @@ const ResetPassword = lazy(() => import("./pages/ResetPassword"));
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const FlightPlan = lazy(() => import("./pages/FlightPlan"));
 const NotFound = lazy(() => import("./pages/NotFound"));
+const Privacy = lazy(() => import("./pages/Privacy"));
 
 const AnimatedRoutes = () => {
   const location = useLocation();
@@ -29,6 +30,7 @@ const AnimatedRoutes = () => {
           <Route path="/auth" element={<Auth />} />
           <Route path="/auth/callback" element={<AuthCallback />} />
           <Route path="/auth/reset" element={<ResetPassword />} />
+          <Route path="/privacy" element={<Privacy />} />
           <Route path="/dashboard" element={<AuthGuard><Dashboard /></AuthGuard>} />
           <Route path="/plan" element={<AuthGuard><FlightPlan /></AuthGuard>} />
           <Route path="*" element={<NotFound />} />

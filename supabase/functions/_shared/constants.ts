@@ -14,12 +14,21 @@ export const DEFAULT_COORDS: readonly [number, number] = [40.7128, -74.006];
 const SHARED_ALLOW_HEADERS =
   "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version";
 
+/** Local development origins permitted when no ALLOWED_ORIGINS is configured. */
+const DEV_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+
 /**
- * Returns origin-aware CORS headers. In production set the ALLOWED_ORIGINS
- * environment variable to a comma-separated list of your app's URLs, e.g.:
+ * Returns origin-aware CORS headers. In production you MUST set the
+ * ALLOWED_ORIGINS environment variable to a comma-separated list of your app's
+ * URLs, e.g.:
  *   https://shnav.app,https://www.shnav.app
- * When the env var is not set the function falls back to "*" so local dev
- * still works without additional configuration.
+ *
+ * Fail-closed behaviour: when ALLOWED_ORIGINS is not set, only local-development
+ * origins (localhost / 127.0.0.1) are permitted. We never fall back to "*", so a
+ * production deploy that forgets to configure ALLOWED_ORIGINS will have its
+ * cross-origin calls blocked by the browser rather than allowing any site on the
+ * internet to invoke these functions. (The JWT check still protects the data
+ * either way; this prevents cross-origin abuse and drive-by invocation.)
  */
 export function getCorsHeaders(req: Request): Record<string, string> {
   const raw = Deno.env.get("ALLOWED_ORIGINS") ?? "";
@@ -27,20 +36,24 @@ export function getCorsHeaders(req: Request): Record<string, string> {
   const origin = req.headers.get("Origin") ?? "";
 
   let allowOrigin: string;
-  if (allowed.length === 0) {
-    allowOrigin = "*";
-  } else if (allowed.includes(origin)) {
+  if (allowed.length > 0) {
+    // Explicit allow-list (production): echo the origin only when it matches.
+    // Otherwise return the first configured origin so the browser blocks the
+    // request — we never echo an untrusted origin back.
+    allowOrigin = allowed.includes(origin) ? origin : allowed[0];
+  } else if (DEV_ORIGIN_RE.test(origin)) {
+    // No allow-list configured — permit local dev origins only.
     allowOrigin = origin;
   } else {
-    // Origin not in the allow-list — respond with the first configured origin.
-    // The browser will block the request (CORS policy), which is the intended
-    // outcome. We never echo an untrusted origin back.
-    allowOrigin = allowed[0];
+    // No allow-list and a non-local origin: return a value that cannot match,
+    // so the browser's CORS check blocks the request. Fails closed.
+    allowOrigin = "null";
   }
 
+  // Response varies by Origin in every branch now, so always advertise it.
   return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Headers": SHARED_ALLOW_HEADERS,
-    ...(allowed.length > 0 ? { "Vary": "Origin" } : {}),
+    "Vary": "Origin",
   };
 }

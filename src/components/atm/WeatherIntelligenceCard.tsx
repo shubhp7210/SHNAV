@@ -154,7 +154,8 @@ export default function WeatherIntelligenceCard({ weather }: Props) {
           ))}
         </div>
 
-        {/* Hazard probabilities */}
+        {/* Hazard probabilities — ESTIMATED from wind/temperature/precip, not a
+            direct turbulence/icing observation. Labeled honestly per project rules. */}
         <div className="grid grid-cols-2 gap-2">
           <div className="bg-black/20 rounded-md px-3 py-2">
             <div className="flex items-center justify-between">
@@ -163,6 +164,7 @@ export default function WeatherIntelligenceCard({ weather }: Props) {
                 {hazards.turbulencePct}%
               </span>
             </div>
+            <span className="text-[9px] font-mono text-white/30">estimated from gusts</span>
           </div>
           <div className="bg-black/20 rounded-md px-3 py-2">
             <div className="flex items-center justify-between">
@@ -171,6 +173,7 @@ export default function WeatherIntelligenceCard({ weather }: Props) {
                 {hazards.icingPct}%
               </span>
             </div>
+            <span className="text-[9px] font-mono text-white/30">estimated from temp/precip</span>
           </div>
         </div>
 

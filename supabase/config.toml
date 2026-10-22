@@ -1,1 +1,39 @@
 project_id = "jiagegvlehrawpxcrwsd"
+
+# Per-function JWT verification at the Supabase API gateway.
+# Defense-in-depth backstop: even though every function validates auth internally
+# (requireUserAuth / requireInternalSecret), the gateway now rejects unauthenticated
+# calls for user-facing functions too — so a future function that forgets its
+# in-code auth check is not left wide open. The frontend already sends the user's
+# JWT, so verify_jwt = true is transparent to it.
+#
+# background-analyzer is the only exception: it is invoked server-to-server (cron)
+# with the X-Internal-Secret header and no JWT, so gateway JWT verification must be
+# disabled for it and auth is enforced in-code via requireInternalSecret().
+
+[functions.background-analyzer]
+verify_jwt = false
+
+[functions.airspace-scheduler]
+verify_jwt = true
+
+[functions.flight-decision-engine]
+verify_jwt = true
+
+[functions.record-flight-outcome]
+verify_jwt = true
+
+[functions.route-optimizer]
+verify_jwt = true
+
+[functions.trajectory-analysis]
+verify_jwt = true
+
+[functions.trajectory-predictor]
+verify_jwt = true
+
+[functions.vertiport-coordinator]
+verify_jwt = true
+
+[functions.weather-intelligence]
+verify_jwt = true

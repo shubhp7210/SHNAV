@@ -355,7 +355,8 @@ Deno.serve(async (req) => {
   } catch (err) {
     if (err instanceof Response) return err;
     console.error("[record-flight-outcome] unhandled", err);
-    return new Response(JSON.stringify({ error: String(err) }), {
+    console.error("[edge] unhandled error:", err);
+    return new Response(JSON.stringify({ error: "Internal server error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

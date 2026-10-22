@@ -99,7 +99,7 @@ const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelect
 
   if (!routeData) return null;
 
-  const { primary_route, alternate_routes, conflict_details, weather_conditions, weather_risk, historical_suggestion } = routeData;
+  const { primary_route, alternate_routes, conflict_details, conflict_check, weather_conditions, weather_risk, historical_suggestion } = routeData;
 
   return (
     <motion.div
@@ -190,10 +190,24 @@ const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelect
             Conflict Summary
           </p>
           {conflict_details.length === 0 ? (
-            <div className="flex items-center gap-2 text-green-400">
-              <CheckCircle className="w-4 h-4" />
-              <span className="text-sm">Airspace clear</span>
-            </div>
+            // Honest "no conflict" — distinguishes a completed clear check from an
+            // incomplete one or an older backend that returned no conflict metadata.
+            conflict_check?.status === "checked_clear" ? (
+              <div className="flex items-center gap-2 text-green-400">
+                <CheckCircle className="w-4 h-4" />
+                <span className="text-sm">No conflicts detected · {conflict_check.evaluated_flights} flight{conflict_check.evaluated_flights === 1 ? "" : "s"} checked</span>
+              </div>
+            ) : conflict_check?.status === "incomplete" ? (
+              <div className="flex items-center gap-2 text-amber-400">
+                <AlertTriangle className="w-4 h-4" />
+                <span className="text-sm">Conflict check incomplete — missing data</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <AlertTriangle className="w-4 h-4" />
+                <span className="text-sm">Conflict status unavailable</span>
+              </div>
+            )
           ) : (
             <div className="space-y-2">
               {conflict_details.map((c, i) => (
@@ -293,9 +307,19 @@ const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelect
       </div>
 
       {/* Analysis summary footer */}
-      <div className="border-t border-border/30 pt-3 text-[11px] text-muted-foreground font-mono">
-        <span className="text-primary/70">Method:</span>{" "}
-        {routeData.analysis_summary.optimization_method} · {routeData.analysis_summary.routes_evaluated} routes evaluated
+      <div className="border-t border-border/30 pt-3 text-[11px] text-muted-foreground font-mono space-y-1">
+        <div>
+          <span className="text-primary/70">Method:</span>{" "}
+          {routeData.analysis_summary.optimization_method} · {routeData.analysis_summary.routes_evaluated} routes evaluated
+        </div>
+        {conflict_check && (
+          <div>
+            <span className="text-primary/70">Conflict check:</span>{" "}
+            {conflict_check.method} · {conflict_check.evaluated_flights} checked
+            {conflict_check.skipped_flights > 0 && `, ${conflict_check.skipped_flights} skipped (missing data)`}
+            {" · "}updated {new Date(conflict_check.generated_at).toLocaleTimeString()}
+          </div>
+        )}
       </div>
     </motion.div>
   );

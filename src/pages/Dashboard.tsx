@@ -8,8 +8,8 @@ import {
   CheckCircle, Navigation, Shield, Wind,
   Radio, Cpu, MapPin, Zap, ChevronRight, Home,
 } from "lucide-react";
-import maplibregl from "maplibre-gl";
-import "maplibre-gl/dist/maplibre-gl.css";
+import { useUserCenter } from "@/lib/useUserCenter";
+import MapView, { type Pt } from "@/components/MapView";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
@@ -72,21 +72,6 @@ const ATM_SYSTEMS = [
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function buildArc(from: [number, number], to: [number, number]): [number, number][] {
-  const pts: [number, number][] = [];
-  for (let i = 0; i <= 60; i++) {
-    const t = i / 60;
-    const arc = Math.sin(t * Math.PI) * 0.008;
-    pts.push([from[0] + (to[0] - from[0]) * t + arc * 0.4, from[1] + (to[1] - from[1]) * t + arc]);
-  }
-  return pts;
-}
-
-function routeColor(status: string): string {
-  if (["in_air", "active", "analyzing"].includes(status)) return "#e05644";
-  if (["approved", "boarding"].includes(status)) return "rgba(255,255,255,0.65)";
-  return "#fbbf24";
-}
 
 /** Origins/destinations picked via location search carry "name @ lat,lon". */
 function parseTaggedCoords(loc: string): { lat: number; lon: number } | null {
@@ -116,135 +101,16 @@ function ScoreRing({ score, size = 44 }: { score: number; size?: number }) {
 }
 
 // ── Map component ─────────────────────────────────────────────────────────────
+// Thin adapter: converts the dashboard's MapRoute[] ({from,to,status} in [lng,lat])
+// into the renderer-agnostic {lat,lng} route shape and hands off to <MapView/>,
+// which picks the Cesium 3D renderer (WebGL) or the canvas fallback.
 function OpsMap({ interactive = false, routes }: { interactive?: boolean; routes?: MapRoute[] }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<maplibregl.Map | null>(null);
-  // Also held in state so the route-drawing effect re-runs once the map is
-  // ready — init can happen after routes arrive (ResizeObserver defers it).
-  const [mapInstance, setMapInstance] = useState<maplibregl.Map | null>(null);
-
-  useEffect(() => {
-    if (!ref.current) return;
-    let disposed = false;
-    let rotationRaf: number | null = null;
-
-    const init = () => {
-      if (!ref.current || mapRef.current || disposed) return;
-      const { width, height } = ref.current.getBoundingClientRect();
-      if (width === 0 || height === 0) return; // wait for real dimensions
-
-      const map = new maplibregl.Map({
-        container: ref.current,
-        style: "https://tiles.openfreemap.org/styles/bright",
-        center: [-73.9857, 40.7484],
-        zoom: interactive ? 12 : 13.5,
-        pitch: interactive ? 45 : 62,
-        bearing: -20,
-        interactive,
-        attributionControl: false,
-        antialias: true,
-      });
-
-      map.on("load", () => {
-        map.resize();
-
-        const bldgLayer = map.getStyle().layers?.find((l: any) => l["source-layer"] === "building") as any;
-        const srcId = bldgLayer?.source;
-        if (srcId) {
-          map.addLayer({
-            id: "db-bldg",
-            type: "fill-extrusion",
-            source: srcId,
-            "source-layer": "building",
-            minzoom: 12,
-            paint: {
-              "fill-extrusion-color": "#aaa",
-              "fill-extrusion-height": ["coalesce", ["get", "render_height"], ["get", "height"], 6],
-              "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
-              "fill-extrusion-opacity": 0.7,
-            },
-          });
-        }
-
-        if (!interactive) {
-          let bearing = -20;
-          const tick = () => {
-            if (disposed) return;
-            bearing += 0.015;
-            map.setBearing(bearing % 360);
-            rotationRaf = requestAnimationFrame(tick);
-          };
-          rotationRaf = requestAnimationFrame(tick);
-        }
-      });
-
-      mapRef.current = map;
-      setMapInstance(map);
-    };
-
-    // Try immediately, then watch for the container to get real size
-    init();
-    const ro = new ResizeObserver(() => {
-      if (!mapRef.current) init();
-      else mapRef.current.resize();
-    });
-    ro.observe(ref.current);
-
-    return () => {
-      disposed = true;
-      if (rotationRaf !== null) cancelAnimationFrame(rotationRaf);
-      ro.disconnect();
-      mapRef.current?.remove();
-      mapRef.current = null;
-      setMapInstance(null);
-    };
-  }, [interactive]);
-
-  // Draw flight paths when routes data arrives (or when the map becomes ready)
-  useEffect(() => {
-    const map = mapInstance;
-    if (!map || !routes?.length) return;
-
-    const layerIds: string[] = [];
-    const sourceIds: string[] = [];
-
-    const draw = () => {
-      // Clean up any previous route layers first
-      layerIds.forEach(id => { try { if (map.getLayer(id)) map.removeLayer(id); } catch {} });
-      sourceIds.forEach(id => { try { if (map.getSource(id)) map.removeSource(id); } catch {} });
-      layerIds.length = 0;
-      sourceIds.length = 0;
-
-      routes.forEach((r, i) => {
-        const pts   = buildArc(r.from, r.to);
-        const color = routeColor(r.status);
-        const srcId  = `fp-src-${i}`;
-        const glowId = `fp-glow-${i}`;
-        const lineId = `fp-line-${i}`;
-
-        map.addSource(srcId, { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: pts } } });
-        map.addLayer({ id: glowId, type: "line", source: srcId, layout: { "line-cap": "round" }, paint: { "line-color": color, "line-width": 8, "line-opacity": 0.12 } });
-        map.addLayer({ id: lineId, type: "line", source: srcId, layout: { "line-cap": "round" }, paint: { "line-color": color, "line-width": 1.5, "line-opacity": 0.75, "line-dasharray": [4, 4] } });
-
-        layerIds.push(glowId, lineId);
-        sourceIds.push(srcId);
-      });
-    };
-
-    if (map.isStyleLoaded()) draw();
-    else map.once("load", draw);
-
-    return () => {
-      map.off("load", draw);
-      if (mapRef.current !== map) return; // map already removed
-      layerIds.forEach(id => { try { if (map.getLayer(id)) map.removeLayer(id); } catch {} });
-      sourceIds.forEach(id => { try { if (map.getSource(id)) map.removeSource(id); } catch {} });
-    };
-  }, [routes, mapInstance]);
-
-  return (
-    <div ref={ref} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }} />
-  );
+  const userCenter = useUserCenter();
+  const [clng, clat] = userCenter;
+  const r3d: Pt[][] = routes && routes.length > 0
+    ? routes.map((r) => [{ lat: r.from[1], lng: r.from[0] }, { lat: r.to[1], lng: r.to[0] }])
+    : [[{ lat: clat - 0.02, lng: clng - 0.025 }, { lat: clat + 0.03, lng: clng + 0.02 }]];
+  return <MapView routes={r3d} animate rotate={!interactive} interactive={interactive} label="Operations map" />;
 }
 
 // ── Main component ─────────────────────────────────────────────────────────────
@@ -445,7 +311,7 @@ export default function Dashboard() {
                   style={{ background: "radial-gradient(ellipse at 50% 50%, transparent 40%, rgba(4,9,18,0.45) 100%)" }} />
                 <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-black/60 backdrop-blur-sm rounded-lg px-2.5 py-1.5 border border-white/10 pointer-events-none">
                   <Activity className="w-3 h-3 text-primary" />
-                  <span className="text-[10px] font-mono text-white/70 tracking-widest">NYC METRO · LIVE</span>
+                  <span className="text-[10px] font-mono text-white/70 tracking-widest">METRO AIRSPACE · LIVE</span>
                 </div>
                 <div className="absolute bottom-3 left-3 pointer-events-none">
                   <div className="flex items-center gap-1.5">

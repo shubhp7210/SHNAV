@@ -422,6 +422,12 @@ export default function Auth() {
               >
                 {loading ? "Creating account…" : <><span>Create Account</span><ArrowRight className="w-4 h-4" /></>}
               </button>
+              <p className="text-[11px] text-center text-muted-foreground leading-relaxed">
+                By creating an account you agree to our{" "}
+                <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                  Privacy Policy
+                </a>.
+              </p>
             </form>
 
             <button

@@ -1,6 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { getCorsHeaders } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
+import { checkRateLimit, tooManyRequests } from "../_shared/ratelimit.ts";
 
 function getPriority(aircraftType: string, isEmergency: boolean): number {
   if (isEmergency) return 100;
@@ -27,6 +28,9 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
+
+    const rl = await checkRateLimit(supabase, user.id, "airspace-scheduler", 30, 60);
+    if (!rl.allowed) return tooManyRequests(corsHeaders, rl.windowSeconds);
 
     const {
       flight_intent_id,
@@ -172,7 +176,8 @@ Deno.serve(async (req) => {
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
     if (err instanceof Response) return err;
-    return new Response(JSON.stringify({ error: String(err) }), {
+    console.error("[edge] unhandled error:", err);
+    return new Response(JSON.stringify({ error: "Internal server error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

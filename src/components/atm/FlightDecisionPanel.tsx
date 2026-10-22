@@ -23,7 +23,9 @@ type DecisionConfig = {
 const DECISION_CONFIG: Record<FlightDecision, DecisionConfig> = {
   GO: {
     icon: CheckCircle,
-    label: "CLEARED TO GO",
+    // Decision-support recommendation, NOT a real operational clearance — no UAM
+    // ATC authority backs this. Honest wording per the project's no-false-certainty rule.
+    label: "PROCEED — RECOMMENDED",
     bg: "from-emerald-900/60 to-emerald-800/30",
     border: "border-emerald-500/50",
     glow: "shadow-emerald-500/20",
@@ -157,6 +159,12 @@ export default function FlightDecisionPanel({ decision, loading }: Props) {
             <div>Route score: <span className="text-white">{decision.inputs_summary.route_score}/100</span></div>
           </div>
         )}
+
+        {/* Honest framing: this is decision support, not an operational clearance. */}
+        <p className="text-[10px] font-mono text-white/35 border-t border-white/10 pt-2 leading-relaxed">
+          Decision support for a simulated UAM network — not an operational ATC clearance.
+          Verify against authorized sources before any real flight.
+        </p>
       </div>
     </motion.div>
   );

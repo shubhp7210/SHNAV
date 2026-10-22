@@ -2,6 +2,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { getCorsHeaders } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
 import { getCoords } from "../_shared/geocode.ts";
+import { readBody, validateFields } from "../_shared/validate.ts";
+import { checkRateLimit, tooManyRequests } from "../_shared/ratelimit.ts";
 import {
   computeRisk,
   riskLevel,
@@ -23,9 +25,21 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
-    await requireUserAuth(req);
+    const user = await requireUserAuth(req);
 
-    const { origin, destination, altitude_band } = await req.json();
+    const admin = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    );
+    const rl = await checkRateLimit(admin, user.id, "weather-intelligence", 60, 60);
+    if (!rl.allowed) return tooManyRequests(corsHeaders, rl.windowSeconds);
+
+    const body = await readBody(req);
+    const { origin, destination, altitude_band } = validateFields(body, {
+      origin: { type: "string", maxLength: 200 },
+      destination: { type: "string", maxLength: 200 },
+      altitude_band: { type: "string", oneOf: ["low", "mid", "high"] },
+    }) as { origin?: string; destination?: string; altitude_band?: string };
     const [oLat, oLon] = await getCoords(origin ?? "");
     const [dLat, dLon] = await getCoords(destination ?? "");
 
@@ -143,7 +157,8 @@ Deno.serve(async (req) => {
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
     if (err instanceof Response) return err;
-    return new Response(JSON.stringify({ error: String(err) }), {
+    console.error("[edge] unhandled error:", err);
+    return new Response(JSON.stringify({ error: "Internal server error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

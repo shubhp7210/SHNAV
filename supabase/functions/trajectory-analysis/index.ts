@@ -1,6 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { getCorsHeaders } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
+import { checkRateLimit, tooManyRequests } from "../_shared/ratelimit.ts";
 import { getCoordsObj as getCoords } from "../_shared/geocode.ts";
 import { readBody, validateFields } from "../_shared/validate.ts";
 
@@ -46,6 +47,9 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, serviceKey);
+
+    const rl = await checkRateLimit(supabase, user.id, "trajectory-analysis", 30, 60);
+    if (!rl.allowed) return tooManyRequests(corsHeaders, rl.windowSeconds);
 
     const raw = await readBody(req);
     const validated = validateFields(raw, {
@@ -196,7 +200,7 @@ Deno.serve(async (req) => {
     const message = error instanceof Error ? error.message : String(error);
     console.error("Trajectory analysis error:", message);
     return new Response(
-      JSON.stringify({ error: message }),
+      JSON.stringify({ error: "Internal server error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }

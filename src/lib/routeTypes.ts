@@ -76,6 +76,15 @@ export interface RouteOptimizerResult {
   primary_route: RouteCandidate;
   alternate_routes: RouteCandidate[];
   conflict_details: ConflictDetail[];
+  /** Traceable conflict-check result. `checked_clear` only after ≥1 flight was
+   *  evaluated with no conflict; `incomplete` when required data was missing. */
+  conflict_check?: {
+    status: "checked_clear" | "conflicts" | "incomplete";
+    evaluated_flights: number;
+    skipped_flights: number;
+    method: string;
+    generated_at: string;
+  };
   weather_conditions: WeatherConditions;
   weather_risk: "low" | "moderate" | "high" | "unknown";
   historical_suggestion: HistoricalSuggestion;

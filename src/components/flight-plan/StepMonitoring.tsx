@@ -1,25 +1,20 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  CheckCircle, AlertTriangle, Radio, Lock, Unlock,
-  Volume2, VolumeX, Navigation, Zap, Activity,
+  CheckCircle, AlertTriangle, Radio, Navigation, Zap, Activity,
   Home, LayoutDashboard, ArrowRight,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import type { FlightPlanData } from "@/pages/FlightPlan";
 import type { TrajectoryPredictorResult, FutureConflict } from "@/lib/atmTypes";
-import maplibregl from "maplibre-gl";
-import "maplibre-gl/dist/maplibre-gl.css";
 import { FlightAudio, haptic } from "@/lib/flightAudio";
 import { supabase } from "@/integrations/supabase/client";
 import HudOverlay, { type PovMode } from "@/components/flight-plan/HudOverlay";
+import MapView, { type Pt } from "@/components/MapView";
+import Cockpit from "@/components/flight-plan/Cockpit";
+import type { CameraMode } from "@/lib/cesium/cameraModes";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const POV_PRESET: Record<PovMode, { pitch: number; zoom: number }> = {
-  fpv: { pitch: 72, zoom: 16.2 },
-  tac: { pitch: 35, zoom: 14.2 },
-  hyb: { pitch: 60, zoom: 15 },
-};
 const POV_COOLDOWN_MS = 4000;
 const SHARP_TURN_DEG  = 35;
 
@@ -77,6 +72,19 @@ function getPlannedRoute(data: FlightPlanData): [number, number][] | null {
   return pts.length >= 2 ? pts : null;
 }
 
+/** Total great-circle length of a {lat,lng} polyline, in km. */
+function routeLengthKm(pts: Pt[]): number {
+  let km = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const R = 6371, r = Math.PI / 180;
+    const dLat = (pts[i].lat - pts[i - 1].lat) * r;
+    const dLng = (pts[i].lng - pts[i - 1].lng) * r;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(pts[i - 1].lat * r) * Math.cos(pts[i].lat * r) * Math.sin(dLng / 2) ** 2;
+    km += 2 * R * Math.asin(Math.sqrt(h));
+  }
+  return km;
+}
+
 function calcBearing(a: [number, number], b: [number, number]): number {
   const r = (d: number) => (d * Math.PI) / 180;
   const dl = r(b[0] - a[0]);
@@ -85,48 +93,15 @@ function calcBearing(a: [number, number], b: [number, number]): number {
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
-// ── Map marker elements ───────────────────────────────────────────────────────
-function makeAircraftEl(): HTMLElement {
-  const el = document.createElement("div");
-  el.style.cssText = "width:44px;height:44px;position:relative;";
-  el.innerHTML = `
-    <div style="position:absolute;inset:10px;border-radius:50%;
-      background:rgba(224,86,68,0.35);
-      animation:shnav-mon-pulse 2.2s ease-out infinite;"></div>
-    <div style="position:absolute;inset:7px;border-radius:50%;
-      background:#111;border:2px solid #e05644;
-      box-shadow:0 0 16px rgba(224,86,68,0.7);
-      display:flex;align-items:center;justify-content:center;">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="#e05644" style="margin-top:-1px">
-        <path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8
-                 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1
-                 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>
-      </svg>
-    </div>`;
-  return el;
-}
-
-function makeDotEl(color: string): HTMLElement {
-  const el = document.createElement("div");
-  el.innerHTML = `<div style="width:14px;height:14px;border-radius:50%;
-    background:${color};border:2px solid rgba(255,255,255,0.85);
-    box-shadow:0 0 12px ${color};"></div>`;
-  return el;
-}
+// (Vehicle, pins and route are drawn by the renderer inside <MapView/>.)
 
 // ── Main component ────────────────────────────────────────────────────────────
 const StepMonitoring = ({ data, updateData }: Props) => {
   const navigate = useNavigate();
 
-  // Map refs
-  const mapContainer = useRef<HTMLDivElement>(null);
-  const mapRef       = useRef<maplibregl.Map | null>(null);
-  const markerRef    = useRef<maplibregl.Marker | null>(null);
+  // Animation / telemetry refs
   const animRef      = useRef<number | null>(null);
   const startTsRef   = useRef<number | null>(null);
-  const routePts     = useRef<[number, number][]>([]);
-  const followRef    = useRef(true);
-  const lastCamTs    = useRef(0);
 
   // Audio / haptic refs
   const audioRef      = useRef<FlightAudio | null>(null);
@@ -137,9 +112,10 @@ const StepMonitoring = ({ data, updateData }: Props) => {
   const [progress,   setProgress]   = useState(0);
   const [completed,  setCompleted]  = useState(false);
   const [status,     setStatus]     = useState<"nominal" | "alert">("nominal");
-  const [mapReady,   setMapReady]   = useState(false);
-  const [followMode, setFollowMode] = useState(true);
   const [muted,      setMuted]      = useState(false);
+  const [cameraMode, setCameraMode] = useState<CameraMode>("follow");
+  const [nowTick,    setNowTick]    = useState(() => Date.now());
+  const lastTsRef = useRef<number>(Date.now());
   const [liveConflicts,  setLiveConflicts]  = useState<FutureConflict[]>([]);
   const [flowEfficiency, setFlowEfficiency] = useState(100);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -158,6 +134,15 @@ const StepMonitoring = ({ data, updateData }: Props) => {
   const tacTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const windSpeed = data.atmEngines?.weatherIntel?.origin_weather?.wind_speed ?? null;
+
+  // Planned route as {lat,lng} for the no-WebGL Map3D fallback.
+  const mon3d = useMemo<Pt[]>(() => {
+    const o = getCoords(data.origin, [-73.985, 40.748]);
+    const d = getCoords(data.destination, [-73.94, 40.795]);
+    const pts = getPlannedRoute(data) ?? buildRoute(o, d);
+    return pts.map(([lng, lat]) => ({ lat, lng }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.origin, data.destination, data.routeData, data.atmEngines.flightDecision?.route_id]);
 
   const changePov = (next: PovMode, manual = false) => {
     const now = performance.now();
@@ -192,122 +177,11 @@ const StepMonitoring = ({ data, updateData }: Props) => {
     }
   };
 
-  // ── Map init ──────────────────────────────────────────────────────────────
+  // Drive the cockpit's freshness / "stale" indicator once per second.
   useEffect(() => {
-    if (!data.monitoringActive || !mapContainer.current || mapRef.current) return;
-
-    // Inject pulse keyframe once
-    if (!document.getElementById("shnav-mon-kf")) {
-      const s = document.createElement("style");
-      s.id = "shnav-mon-kf";
-      s.textContent = `
-        @keyframes shnav-mon-pulse {
-          0%  { transform:scale(1);   opacity:0.85; }
-          70% { transform:scale(2.8); opacity:0; }
-          100%{ transform:scale(2.8); opacity:0; }
-        }
-        .maplibregl-ctrl-group { background:rgba(10,10,14,0.9)!important; border:1px solid rgba(255,255,255,0.1)!important; border-radius:8px!important; }
-        .maplibregl-ctrl button { background-color:transparent!important; }
-        .maplibregl-ctrl button .maplibregl-ctrl-icon { filter:invert(1) brightness(0.7)!important; }
-        .maplibregl-ctrl-attrib { opacity:0.15!important; font-size:9px!important; }
-      `;
-      document.head.appendChild(s);
-    }
-
-    const originCoords = getCoords(data.origin,      [-73.985, 40.748]);
-    const destCoords   = getCoords(data.destination,  [-73.94,  40.795]);
-    const pts          = getPlannedRoute(data) ?? buildRoute(originCoords, destCoords);
-    routePts.current   = pts;
-
-    const center: [number, number] = [
-      (originCoords[0] + destCoords[0]) / 2,
-      (originCoords[1] + destCoords[1]) / 2,
-    ];
-
-    const map = new maplibregl.Map({
-      container:   mapContainer.current,
-      style:       "https://tiles.openfreemap.org/styles/bright",
-      center,
-      zoom:        14,
-      pitch:       60,
-      bearing:     calcBearing(originCoords, destCoords),
-      maxPitch:    85,
-      antialias:   true,
-      attributionControl: false,
-    });
-
-    map.addControl(new maplibregl.NavigationControl({ showCompass: true, visualizePitch: true }), "top-right");
-
-    map.on("dragstart", () => { followRef.current = false; setFollowMode(false); });
-    map.on("wheel",     () => { followRef.current = false; setFollowMode(false); });
-
-    const ro = new ResizeObserver(() => map.resize());
-    ro.observe(mapContainer.current);
-
-    map.on("load", () => {
-      map.resize();
-
-      // 3D buildings
-      const vecSrc = Object.entries(map.getStyle().sources ?? {})
-        .find(([, s]) => (s as any).type === "vector")?.[0];
-      if (vecSrc) {
-        map.addLayer({
-          id: "mon-buildings", type: "fill-extrusion",
-          source: vecSrc, "source-layer": "building", minzoom: 12,
-          paint: {
-            "fill-extrusion-color":   "#aaa",
-            "fill-extrusion-height":  ["coalesce", ["get", "render_height"], ["get", "height"], 5],
-            "fill-extrusion-base":    ["coalesce", ["get", "render_min_height"], 0],
-            "fill-extrusion-opacity": 0.7,
-          },
-        });
-      }
-
-      // Route: ghost dashed line
-      map.addSource("mon-route", { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: pts } } });
-      map.addLayer({ id: "mon-route-dash", type: "line", source: "mon-route",
-        layout: { "line-cap": "butt" },
-        paint: { "line-color": "#e05644", "line-width": 1.5, "line-opacity": 0.3, "line-dasharray": [5, 8] } });
-
-      // Traveled trail
-      map.addSource("mon-trail", { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [pts[0]] } } });
-      map.addLayer({ id: "mon-trail-glow", type: "line", source: "mon-trail",
-        layout: { "line-cap": "round" },
-        paint: { "line-color": "#e05644", "line-width": 14, "line-opacity": 0.12 } });
-      map.addLayer({ id: "mon-trail-core", type: "line", source: "mon-trail",
-        layout: { "line-cap": "round" },
-        paint: { "line-color": "#f0887a", "line-width": 2.5, "line-opacity": 0.9 } });
-
-      // Origin / destination dots
-      new maplibregl.Marker({ element: makeDotEl("#e05644") }).setLngLat(originCoords).addTo(map);
-      new maplibregl.Marker({ element: makeDotEl("#fbbf24") }).setLngLat(destCoords).addTo(map);
-
-      // Aircraft marker
-      const aircraft = new maplibregl.Marker({ element: makeAircraftEl(), rotationAlignment: "map" })
-        .setLngLat(pts[0])
-        .addTo(map);
-      markerRef.current = aircraft;
-
-      setMapReady(true);
-    });
-
-    mapRef.current = map;
-
-    return () => {
-      ro.disconnect();
-      if (animRef.current) cancelAnimationFrame(animRef.current);
-      map.remove();
-      mapRef.current     = null;
-      markerRef.current  = null;
-      startTsRef.current = null;
-      followRef.current  = true;
-      lastStatusRef.current = "nominal";
-      waypointsHit.current.clear();
-      setMapReady(false);
-      setProgress(0);
-      setStatus("nominal");
-      setFollowMode(true);
-    };
+    if (!data.monitoringActive) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
   }, [data.monitoringActive]);
 
   // ── Trajectory polling ────────────────────────────────────────────────────
@@ -330,14 +204,15 @@ const StepMonitoring = ({ data, updateData }: Props) => {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [data.monitoringActive, data.flightIntentId]);
 
-  // ── Aircraft tracking: real GPS → simulation fallback ─────────────────────
+  // ── Telemetry driver: real GPS → simulation fallback ──────────────────────
+  // Renderer-agnostic: drives progress/heading/speed/status; <MapView/> renders
+  // the vehicle from `progress`. Landing + record-outcome effects key off
+  // `progress`, so the learning loop fires regardless of which renderer is active.
   useEffect(() => {
-    if (!mapReady) return;
-    const map    = mapRef.current;
-    const marker = markerRef.current;
-    if (!map || !marker) return;
+    if (!data.monitoringActive) return;
+    const pts: [number, number][] = mon3d.map((p) => [p.lng, p.lat]); // [lng,lat]
+    if (pts.length < 2) return;
 
-    const pts = routePts.current;
     audioRef.current?.startAmbient();
     haptic([40, 20, 80, 20, 120]);
 
@@ -347,29 +222,11 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       const h = Math.sin(dLat/2)**2 + Math.cos(a[1]*r)*Math.cos(b[1]*r)*Math.sin(dLon/2)**2;
       return 2 * R * Math.asin(Math.sqrt(h));
     };
-
     const nearestIdx = (pos: [number, number]) => {
       let best = { idx: 0, m: Infinity };
       pts.forEach((p, i) => { const m = distM(pos, p); if (m < best.m) best = { idx: i, m }; });
       return best;
     };
-
-    const updateTrail = (idx: number, pos?: [number, number]) => {
-      const coords = pos ? [...pts.slice(0, idx + 1), pos] : pts.slice(0, idx + 1);
-      (map.getSource("mon-trail") as maplibregl.GeoJSONSource)?.setData({
-        type: "Feature", properties: {},
-        geometry: { type: "LineString", coordinates: coords },
-      });
-    };
-
-    const moveCamera = (pos: [number, number], hdg: number) => {
-      if (!followRef.current || performance.now() - lastCamTs.current < 600) return;
-      lastCamTs.current = performance.now();
-      const { pitch, zoom } = POV_PRESET[povRef.current];
-      map.easeTo({ center: pos, bearing: hdg, pitch, zoom, duration: 900,
-        easing: (x) => 1 - Math.pow(1 - x, 3) });
-    };
-
     const handleAlert = (newStatus: "nominal" | "alert") => {
       if (newStatus === lastStatusRef.current) return;
       lastStatusRef.current = newStatus;
@@ -384,14 +241,11 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       setProgress(idx / Math.max(1, pts.length - 1));
       handleAlert(m > 250 ? "alert" : "nominal");
       const hdg = geo.coords.heading ?? calcBearing(pos, pts[Math.min(idx + 3, pts.length - 1)]);
-      marker.setLngLat(pos);
-      marker.setRotation(hdg);
-      updateTrail(idx, pos);
       setHeading(hdg);
       setSpeedKmh((geo.coords.speed ?? 0) * 3.6);
       setDriftClock(m > 250 ? computeDriftClock(pos, pts[idx], hdg) : null);
       evaluateAutoPov(hdg, performance.now());
-      moveCamera(pos, hdg);
+      lastTsRef.current = Date.now();
     };
 
     const startSim = () => {
@@ -419,14 +273,11 @@ const StepMonitoring = ({ data, updateData }: Props) => {
           audioRef.current?.stopAmbient(3);
           haptic([80, 40, 80, 40, 300]);
         }
-        marker.setLngLat(pos);
-        marker.setRotation(hdg);
-        updateTrail(idx);
         setHeading(hdg);
         setSpeedKmh(90);
         setDriftClock(t >= 0.28 && t < 0.42 ? computeDriftClock(pos, pts[idx], hdg) : null);
         evaluateAutoPov(hdg, ts);
-        moveCamera(pos, hdg);
+        lastTsRef.current = Date.now();
         if (t < 1) animRef.current = requestAnimationFrame(tick);
       };
       animRef.current = requestAnimationFrame(tick);
@@ -450,10 +301,13 @@ const StepMonitoring = ({ data, updateData }: Props) => {
     }
 
     return () => {
-      if (animRef.current) cancelAnimationFrame(animRef.current);
+      if (animRef.current) { cancelAnimationFrame(animRef.current); animRef.current = null; }
       if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+      startTsRef.current = null;
+      waypointsHit.current.clear();
+      lastStatusRef.current = "nominal";
     };
-  }, [mapReady, data.aircraftId, data.flightIntentId]);
+  }, [data.monitoringActive, mon3d, data.aircraftId, data.flightIntentId]);
 
   // ── Flight lifecycle ──────────────────────────────────────────────────────
   // Supabase query builders are lazy — they only execute when awaited, so
@@ -609,6 +463,7 @@ const StepMonitoring = ({ data, updateData }: Props) => {
 
   const pct = Math.round(progress * 100);
   const eta = Math.max(0, Math.round((1 - progress) * 48));
+  const remainingKm = mon3d.length >= 2 ? routeLengthKm(mon3d) * (1 - progress) : null;
 
   return (
     <div className="space-y-4">
@@ -642,7 +497,10 @@ const StepMonitoring = ({ data, updateData }: Props) => {
 
       {/* 3D Map */}
       <div className="relative w-full rounded-xl overflow-hidden border border-white/10 h-[60vh] min-h-[360px] md:h-[460px]">
-        <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
+        <MapView
+          routes={[mon3d]} progress={progress} heading={heading} speedKmh={speedKmh}
+          cameraMode={cameraMode} interactive color="#FF3157" label="Flight route"
+        />
 
         <HudOverlay
           heading={heading} speedKmh={speedKmh} windSpeed={windSpeed}
@@ -657,25 +515,19 @@ const StepMonitoring = ({ data, updateData }: Props) => {
           driftSeverity={status === "alert" ? "moderate" : "low"}
         />
 
-        {/* Follow / mute controls */}
-        <div className="absolute bottom-3 left-3 z-10 flex items-center gap-2">
-          <button
-            onClick={() => { const n = !followRef.current; followRef.current = n; setFollowMode(n); haptic([20]); }}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-full text-[11px] font-mono font-semibold border transition-colors ${
-              followMode
-                ? "bg-primary/20 border-primary/40 text-primary"
-                : "bg-black/60 border-white/10 text-white/50 hover:border-white/20"
-            }`}
-          >
-            {followMode ? <><Lock className="w-3.5 h-3.5" />Following</> : <><Unlock className="w-3.5 h-3.5" />Explore</>}
-          </button>
-          <button
-            onClick={() => { const n = !muted; setMuted(n); audioRef.current?.setMuted(n); haptic([15]); }}
-            className="w-10 h-10 flex items-center justify-center rounded-full bg-black/60 border border-white/10 text-white/50 hover:border-white/20 transition-colors"
-          >
-            {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-          </button>
-        </div>
+        <Cockpit
+          heading={heading}
+          speedKmh={speedKmh}
+          progress={progress}
+          status={status}
+          distanceKm={remainingKm}
+          lastUpdateMs={lastTsRef.current}
+          now={nowTick}
+          cameraMode={cameraMode}
+          onMode={(m) => { setCameraMode(m); haptic([15]); }}
+          muted={muted}
+          onToggleMute={() => { const n = !muted; setMuted(n); audioRef.current?.setMuted(n); haptic([15]); }}
+        />
       </div>
 
       {/* Route info */}

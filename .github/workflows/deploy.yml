@@ -28,8 +28,11 @@ jobs:
       - name: Run database migrations
         run: supabase db push
 
+      # Per-function verify_jwt is governed by supabase/config.toml ([functions.*]).
+      # Do NOT pass --no-verify-jwt here: that would force gateway JWT off for every
+      # function and override the per-function settings. pattern-learner was removed.
       - name: Deploy edge functions
-        run: supabase functions deploy --no-verify-jwt airspace-scheduler background-analyzer flight-decision-engine pattern-learner record-flight-outcome route-optimizer trajectory-analysis trajectory-predictor vertiport-coordinator weather-intelligence
+        run: supabase functions deploy airspace-scheduler background-analyzer flight-decision-engine record-flight-outcome route-optimizer trajectory-analysis trajectory-predictor vertiport-coordinator weather-intelligence
 
       - name: Set INTERNAL_FUNCTION_SECRET
         run: |

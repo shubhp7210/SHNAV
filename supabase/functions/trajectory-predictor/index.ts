@@ -5,6 +5,7 @@ import {
   MIN_SEPARATION_KM,
 } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
+import { checkRateLimit, tooManyRequests } from "../_shared/ratelimit.ts";
 import { getCoords } from "../_shared/geocode.ts";
 import { haversineKm, interpolatePosition } from "../_shared/geo.ts";
 
@@ -20,6 +21,9 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
+
+    const rl = await checkRateLimit(supabase, user.id, "trajectory-predictor", 120, 60);
+    if (!rl.allowed) return tooManyRequests(corsHeaders, rl.windowSeconds);
 
     const { flight_intent_id } = await req.json();
     console.info("[trajectory-predictor] received request", { flight_intent_id, user_id: user.id });
@@ -145,7 +149,8 @@ Deno.serve(async (req) => {
     }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
     if (err instanceof Response) return err;
-    return new Response(JSON.stringify({ error: String(err) }), {
+    console.error("[edge] unhandled error:", err);
+    return new Response(JSON.stringify({ error: "Internal server error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });

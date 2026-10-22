@@ -19,8 +19,8 @@ import type { ATMEngineState, WeatherIntelligenceResult, AirspaceScheduleResult,
 import StepRegistration from "@/components/flight-plan/StepRegistration";
 import StepIntent from "@/components/flight-plan/StepIntent";
 import StepClearance from "@/components/flight-plan/StepClearance";
-// StepMonitoring pulls in maplibre-gl (~600 kB) — lazy-load so initial routes
-// stay light, especially on mobile where the user may never reach this step.
+// StepMonitoring carries the live 3D view and audio engine — lazy-load so initial
+// routes stay light, especially on mobile where the user may never reach this step.
 const StepMonitoring = lazy(() => import("@/components/flight-plan/StepMonitoring"));
 
 // Authority Review step removed — the decision engine produces a single

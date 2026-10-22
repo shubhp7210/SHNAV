@@ -140,7 +140,7 @@ Deno.serve(async (req) => {
     const message = error instanceof Error ? error.message : String(error);
     console.error("Background analyzer error:", message);
     return new Response(
-      JSON.stringify({ error: message }),
+      JSON.stringify({ error: "Internal server error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }

@@ -2,6 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import path from "path";
 import { componentTagger } from "lovable-tagger";
+// Copies Cesium's static assets (Workers, Assets, Widgets, ThirdParty) and sets
+// CESIUM_BASE_URL so the engine can load them at runtime.
+import cesium from "vite-plugin-cesium";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
@@ -18,20 +21,20 @@ export default defineConfig(({ mode }) => ({
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(self), payment=()",
     },
   },
-  plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
+  plugins: [react(), cesium(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
   },
   build: {
-    // maplibre-gl is a WebGL renderer; its ~800 kB bundle can't be split further (gzips to ~218 kB)
-    chunkSizeWarningLimit: 900,
+    // Cesium is a large WebGL renderer; isolate it in its own chunk.
+    chunkSizeWarningLimit: 4000,
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes("node_modules/mapbox-gl") || id.includes("node_modules/maplibre-gl")) {
-            return "vendor-maps";
+          if (id.includes("node_modules/cesium")) {
+            return "vendor-cesium";
           }
           if (id.includes("node_modules/recharts") || id.includes("node_modules/d3-")) {
             return "vendor-charts";

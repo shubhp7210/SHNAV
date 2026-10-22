@@ -5,13 +5,27 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { getCorsHeaders, EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
+import { checkRateLimit, tooManyRequests } from "../_shared/ratelimit.ts";
 import { getCoords } from "../_shared/geocode.ts";
+import { checkNetwork, toMinutes as toMin, type FlightTrack, type Conflict } from "../_shared/conflicts.ts";
 import {
   bearingDeg,
   haversineKm as haversine,
   type LatLon,
   windRelativeToHeading,
 } from "../_shared/geo.ts";
+
+/** Human-readable conflict label with the supporting separation + timing facts. */
+function conflictLabel(c: Conflict): string {
+  const kind: Record<Conflict["type"], string> = {
+    crossing: "Crossing route",
+    converging: "Converging route",
+    "shared-corridor": "Shared corridor",
+    parallel: "Near-parallel route",
+    "approach-proximity": "Vertiport/approach proximity",
+  };
+  return `${kind[c.type]} · ${c.horizontalSepKm.toFixed(2)} km sep · ${c.timeOverlapMin} min window (±${c.uncertaintyMin} min)`;
+}
 import {
   icingFromWeather,
   turbulenceFromGustCross,
@@ -197,23 +211,29 @@ const DEFAULT_WEIGHTS: ScoreWeights = {
   weight_efficiency: 0.15, weight_time: 0.20, weight_fuel: 0.10,
 };
 
+/** Clamp a score into the valid 0–100 band so no displayed metric can exceed 100. */
+const clampScore = (n: number): number => Math.max(0, Math.min(100, n));
+
 function scoreEval(ev: RouteEval, fastestTimeMin: number, shortestDistKm: number, weights: ScoreWeights) {
   const timeDelta = Math.max(0, ev.timeMin - fastestTimeMin);
-  const timeScore = Math.max(10, 100 - (timeDelta / Math.max(1, fastestTimeMin)) * 120);
-  const windScore = Math.max(10, Math.min(100, 60 - ev.avgHeadwindKmh * 1.2 - ev.avgCrosswindKmh * 0.5 + 40));
-  const wxScore = Math.max(10, 100 - ev.avgWxSeverity * 80 - ev.maxWxSeverity * 20);
-  const turbScore = Math.max(10, 100 - ev.avgTurbulence * 70 - ev.maxTurbulence * 30);
+  const timeScore = clampScore(Math.max(10, 100 - (timeDelta / Math.max(1, fastestTimeMin)) * 120));
+  const windScore = clampScore(Math.max(10, 60 - ev.avgHeadwindKmh * 1.2 - ev.avgCrosswindKmh * 0.5 + 40));
+  const wxScore = clampScore(Math.max(10, 100 - ev.avgWxSeverity * 80 - ev.maxWxSeverity * 20));
+  const turbScore = clampScore(Math.max(10, 100 - ev.avgTurbulence * 70 - ev.maxTurbulence * 30));
   const fuelRatio = ev.timeMin / Math.max(1, ev.baseTimeMin);
-  const fuelScore = Math.max(10, 100 - (fuelRatio - 1) * 180);
-  const trafScore = Math.max(10, 100 - Math.min(5, ev.trafficPenalty) * 16);
+  // A tailwind can make a route faster than the no-wind baseline (fuelRatio < 1),
+  // which would push this above 100 — clampScore keeps it in band.
+  const fuelScore = clampScore(Math.max(10, 100 - (fuelRatio - 1) * 180));
+  const trafScore = clampScore(Math.max(10, 100 - Math.min(5, ev.trafficPenalty) * 16));
   const distRatio = ev.distanceKm / Math.max(0.01, shortestDistKm);
-  const effScore = Math.max(10, 100 - (distRatio - 1) * 140 - ev.avgIcing * 30);
+  const effScore = clampScore(Math.max(10, 100 - (distRatio - 1) * 140 - ev.avgIcing * 30));
   const visPenalty = ev.avgVisibilityM < 5000 ? (5000 - ev.avgVisibilityM) / 50 : 0;
-  const safetyScore = Math.max(10, 100 - ev.maxWxSeverity * 35 - ev.maxTurbulence * 25 - ev.avgIcing * 25 - visPenalty);
+  const safetyScore = clampScore(Math.max(10, 100 - ev.maxWxSeverity * 35 - ev.maxTurbulence * 25 - ev.avgIcing * 25 - visPenalty));
   const w = weights;
-  const overall =
+  const overall = clampScore(
     safetyScore * w.weight_safety + wxScore * w.weight_weather + trafScore * w.weight_traffic +
-    effScore * w.weight_efficiency + timeScore * w.weight_time + fuelScore * w.weight_fuel;
+    effScore * w.weight_efficiency + timeScore * w.weight_time + fuelScore * w.weight_fuel,
+  );
   const round = (n: number) => Math.round(n);
   return { overall: round(overall), time: round(timeScore), wind: round(windScore), weather: round(wxScore), turbulence: round(turbScore), fuel: round(fuelScore), traffic: round(trafScore), safety: round(safetyScore), efficiency: round(effScore) };
 }
@@ -289,6 +309,9 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
+    const rl = await checkRateLimit(supabase, user.id, "route-optimizer", 30, 60);
+    if (!rl.allowed) return tooManyRequests(corsHeaders, rl.windowSeconds);
+
     const body = await req.json().catch(() => ({}));
     const { aircraft_id, operator_name, origin, destination, altitude_band, departure_window_start, departure_window_end, flight_intent_id } = body;
 
@@ -326,10 +349,9 @@ Deno.serve(async (req) => {
       .order("created_at", { ascending: false })
       .limit(100);
 
-    const conflicts: ConflictEntry[] = [];
-    let conflictDensity = 0;
-    // Geocode all overlapping intents in parallel — the previous serial loop
-    // could issue up to 200 Nominatim round-trips back to back.
+    // Coarse gate: only geocode intents whose raw departure window overlaps ours
+    // (bounds Nominatim calls). The spatiotemporal engine then does the precise
+    // crossing / separation / altitude / time-at-point check on that set.
     const overlappingIntents = (existingIntents ?? []).filter((intent) =>
       windowsOverlap(departure_window_start ?? "00:00", departure_window_end ?? "23:59", intent.departure_window_start, intent.departure_window_end),
     );
@@ -340,13 +362,35 @@ Deno.serve(async (req) => {
         dest: await getCoords(intent.destination),
       })),
     );
-    for (const { intent, origin: iOrigin, dest: iDest } of intentCoords) {
-      const nearOrigin = haversine(originCoords[0], originCoords[1], iOrigin[0], iOrigin[1]) < 20;
-      const nearDest = haversine(destCoords[0], destCoords[1], iDest[0], iDest[1]) < 20;
-      if (!nearOrigin && !nearDest) continue;
-      const severity: ConflictEntry["severity"] = nearOrigin && nearDest ? "high" : "moderate";
-      conflicts.push({ aircraft_id: intent.aircraft_id, conflict_type: severity === "high" ? "Overlapping departure window with shared origin & destination" : "Overlapping departure window with nearby origin or destination", severity });
-      conflictDensity += severity === "high" ? 0.6 : 0.3;
+
+    const candidateTrack: FlightTrack = {
+      id: flight_intent_id ?? "candidate",
+      aircraftId: aircraft_id ?? "CANDIDATE",
+      path: [{ lat: originCoords[0], lon: originCoords[1] }, { lat: destCoords[0], lon: destCoords[1] }],
+      depStartMin: toMin(departure_window_start) ?? 0,
+      depEndMin: toMin(departure_window_end) ?? 1439,
+      altitudeBand: band,
+      cruiseKmh: EVTOL_BASE_SPEED_KMH,
+    };
+    const otherTracks: FlightTrack[] = intentCoords.map(({ intent, origin: o, dest: d }) => ({
+      id: intent.id,
+      aircraftId: intent.aircraft_id,
+      path: [{ lat: o[0], lon: o[1] }, { lat: d[0], lon: d[1] }],
+      depStartMin: toMin(intent.departure_window_start) ?? 0,
+      depEndMin: toMin(intent.departure_window_end) ?? 1439,
+      altitudeBand: intent.altitude_band ?? "low",
+      cruiseKmh: EVTOL_BASE_SPEED_KMH,
+    }));
+
+    const conflictResult = checkNetwork(candidateTrack, otherTracks);
+    const conflicts: ConflictEntry[] = conflictResult.conflicts.map((c) => ({
+      aircraft_id: c.otherId,
+      conflict_type: conflictLabel(c),
+      severity: c.severity,
+    }));
+    let conflictDensity = 0;
+    for (const c of conflictResult.conflicts) {
+      conflictDensity += c.severity === "high" ? 0.6 : c.severity === "moderate" ? 0.3 : 0.15;
     }
 
     // ── 3. Load active no-fly zones for spatial filtering ───────────────
@@ -594,6 +638,15 @@ Deno.serve(async (req) => {
       },
       weather_risk: weatherRisk,
       historical_suggestion: historicalSuggestion,
+      // Traceable conflict-check result (honest status: checked_clear vs
+      // conflicts vs incomplete; never a fabricated "all clear").
+      conflict_check: {
+        status: conflictResult.status,
+        evaluated_flights: conflictResult.evaluatedCount,
+        skipped_flights: conflictResult.skipped.length,
+        method: conflictResult.method,
+        generated_at: new Date().toISOString(),
+      },
       analysis_summary: {
         total_conflicts: conflicts.length,
         routes_evaluated: candidates.length,
@@ -607,7 +660,7 @@ Deno.serve(async (req) => {
     if (error instanceof Response) return error;
     const message = error instanceof Error ? error.message : String(error);
     console.error("Route optimizer error:", message);
-    return new Response(JSON.stringify({ error: message }), {
+    return new Response(JSON.stringify({ error: "Internal server error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
