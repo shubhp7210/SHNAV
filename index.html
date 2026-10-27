@@ -15,7 +15,7 @@
     <!-- Defense-in-depth CSP for hosts that don't apply public/_headers. NOTE: frame-ancestors is
          omitted here because browsers ignore it in a <meta> tag — clickjacking protection comes from
          X-Frame-Options: DENY + CSP frame-ancestors in public/_headers (HTTP headers). -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://tiles.openfreemap.org https://api.open-meteo.com https://nominatim.openstreetmap.org https://api.cesium.com https://assets.ion.cesium.com https://*.cesium.com; worker-src 'self' blob:; base-uri 'self'; form-action 'self'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://tiles.openfreemap.org https://api.open-meteo.com https://nominatim.openstreetmap.org https://services.arcgisonline.com https://api.cesium.com https://assets.ion.cesium.com https://*.cesium.com; worker-src 'self' blob:; base-uri 'self'; form-action 'self'" />
     <meta http-equiv="X-Content-Type-Options" content="nosniff" />
     <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin" />
 

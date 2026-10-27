@@ -9,6 +9,7 @@ import {
   Radio, Cpu, MapPin, Zap, ChevronRight, Home,
 } from "lucide-react";
 import { useUserCenter } from "@/lib/useUserCenter";
+import { centerInRegion } from "@/lib/geo/region";
 import MapView, { type Pt } from "@/components/MapView";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -104,12 +105,14 @@ function ScoreRing({ score, size = 44 }: { score: number; size?: number }) {
 // Thin adapter: converts the dashboard's MapRoute[] ({from,to,status} in [lng,lat])
 // into the renderer-agnostic {lat,lng} route shape and hands off to <MapView/>,
 // which picks the Cesium 3D renderer (WebGL) or the canvas fallback.
-function OpsMap({ interactive = false, routes }: { interactive?: boolean; routes?: MapRoute[] }) {
-  const userCenter = useUserCenter();
-  const [clng, clat] = userCenter;
-  const r3d: Pt[][] = routes && routes.length > 0
+export function OpsMap({ interactive = false, routes }: { interactive?: boolean; routes?: MapRoute[] }) {
+  // Demo route centers on the user's location when it's inside the North
+  // American operating region; otherwise NYC.
+  const [clng, clat] = centerInRegion(useUserCenter());
+  const r3d = useMemo<Pt[][]>(() => routes && routes.length > 0
     ? routes.map((r) => [{ lat: r.from[1], lng: r.from[0] }, { lat: r.to[1], lng: r.to[0] }])
-    : [[{ lat: clat - 0.02, lng: clng - 0.025 }, { lat: clat + 0.03, lng: clng + 0.02 }]];
+    : [[{ lat: clat - 0.02, lng: clng - 0.025 }, { lat: clat + 0.03, lng: clng + 0.02 }]],
+  [routes, clat, clng]);
   return <MapView routes={r3d} animate rotate={!interactive} interactive={interactive} label="Operations map" />;
 }
 

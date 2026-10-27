@@ -144,6 +144,9 @@ const StepMonitoring = ({ data, updateData }: Props) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data.origin, data.destination, data.routeData, data.atmEngines.flightDecision?.route_id]);
 
+  // Stable array identity — progress re-renders this component every frame.
+  const monRoutes = useMemo(() => [mon3d], [mon3d]);
+
   const changePov = (next: PovMode, manual = false) => {
     const now = performance.now();
     if (!manual && now - lastPovChangeRef.current < POV_COOLDOWN_MS) return;
@@ -498,7 +501,7 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       {/* 3D Map */}
       <div className="relative w-full rounded-xl overflow-hidden border border-white/10 h-[60vh] min-h-[360px] md:h-[460px]">
         <MapView
-          routes={[mon3d]} progress={progress} heading={heading} speedKmh={speedKmh}
+          routes={monRoutes} progress={progress} heading={heading} speedKmh={speedKmh}
           cameraMode={cameraMode} interactive color="#FF3157" label="Flight route"
         />
 

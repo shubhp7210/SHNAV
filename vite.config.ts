@@ -21,7 +21,10 @@ export default defineConfig(({ mode }) => ({
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(self), payment=()",
     },
   },
-  plugins: [react(), cesium(), mode === "development" && componentTagger()].filter(Boolean),
+  // rebuildCesium: bundle Cesium as a normal (lazy-loaded) chunk. Without it the
+  // plugin injects a render-blocking 5.8 MB <script src="/cesium/Cesium.js"> into
+  // index.html, so every page — even login — paid for the 3D engine up front.
+  plugins: [react(), cesium({ rebuildCesium: true }), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
@@ -33,7 +36,14 @@ export default defineConfig(({ mode }) => ({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes("node_modules/cesium")) {
+          // Vite's dynamic-import preload helper. Cesium uses import(), so without
+          // this rule Rollup co-locates the helper in vendor-cesium — making every
+          // lazy route (and the entry) statically depend on the 4 MB Cesium chunk.
+          if (id.includes("vite/preload-helper")) {
+            return "vendor-runtime";
+          }
+          // The `cesium` package re-exports @cesium/engine — match both.
+          if (id.includes("node_modules/cesium") || id.includes("node_modules/@cesium/")) {
             return "vendor-cesium";
           }
           if (id.includes("node_modules/recharts") || id.includes("node_modules/d3-")) {

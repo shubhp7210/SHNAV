@@ -19,6 +19,8 @@ const Dashboard = lazy(() => import("./pages/Dashboard"));
 const FlightPlan = lazy(() => import("./pages/FlightPlan"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 const Privacy = lazy(() => import("./pages/Privacy"));
+// Dev-only map test harness — compiled out of production builds.
+const MapTest = import.meta.env.DEV ? lazy(() => import("./pages/MapTest")) : null;
 
 const AnimatedRoutes = () => {
   const location = useLocation();
@@ -33,6 +35,7 @@ const AnimatedRoutes = () => {
           <Route path="/privacy" element={<Privacy />} />
           <Route path="/dashboard" element={<AuthGuard><Dashboard /></AuthGuard>} />
           <Route path="/plan" element={<AuthGuard><FlightPlan /></AuthGuard>} />
+          {MapTest && <Route path="/__maptest" element={<MapTest />} />}
           <Route path="*" element={<NotFound />} />
         </Routes>
       </PageTransition>

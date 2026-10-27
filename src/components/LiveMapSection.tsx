@@ -1,37 +1,32 @@
-import { useMemo } from "react";
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import { ArrowUpRight } from "lucide-react";
-import { useUserCenter, DEFAULT_CENTER } from "@/lib/useUserCenter";
 import MapView, { type Pt } from "@/components/MapView";
 
 const FLIGHT_COLOR = "#FF3157"; // coral-red (premium palette)
 
-// Demo flights authored around NYC ([lng, lat]); rebased onto the user's region.
-const DEMO_FLIGHTS: { origin: [number, number]; dest: [number, number] }[] = [
+// Demo flights over Manhattan ([lng, lat]). The homepage always opens on NYC —
+// no geolocation prompt on the landing page.
+const DEMO_ROUTES: Pt[][] = [
   { origin: [-74.013, 40.706], dest: [-73.944, 40.803] },
   { origin: [-73.986, 40.757], dest: [-74.044, 40.685] },
   { origin: [-73.935, 40.730], dest: [-73.993, 40.768] },
   { origin: [-73.960, 40.780], dest: [-73.997, 40.720] },
-];
+].map((f) => [
+  { lat: f.origin[1], lng: f.origin[0] },
+  { lat: f.dest[1], lng: f.dest[0] },
+]);
 
-function rebasedRoutes(center: [number, number]): Pt[][] {
-  const dLng = center[0] - DEFAULT_CENTER[0];
-  const dLat = center[1] - DEFAULT_CENTER[1];
-  return DEMO_FLIGHTS.map((f) => [
-    { lat: f.origin[1] + dLat, lng: f.origin[0] + dLng },
-    { lat: f.dest[1] + dLat, lng: f.dest[0] + dLng },
-  ]);
-}
+// Tilted view looking north over Midtown, demo routes in frame. Camera sits
+// south of the target so the -48° pitch lands on Manhattan.
+const NYC_VIEW = { lat: 40.672, lng: -73.985, height: 9_000, heading: 0, pitch: -48 };
 
 export default function LiveMapSection() {
   const navigate = useNavigate();
-  const userCenter = useUserCenter();
-  const routes = useMemo(() => rebasedRoutes(userCenter), [userCenter]);
 
   return (
     <section className="relative w-full overflow-hidden" style={{ height: "100vh", minHeight: "600px" }}>
-      <MapView routes={routes} animate rotate interactive color={FLIGHT_COLOR} label="Live airspace" />
+      <MapView routes={DEMO_ROUTES} initialView={NYC_VIEW} animate rotate interactive color={FLIGHT_COLOR} label="Live airspace" />
 
       {/* Live badge */}
       <motion.div

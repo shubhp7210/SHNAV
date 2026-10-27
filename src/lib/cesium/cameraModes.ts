@@ -11,7 +11,11 @@ interface Vehicle { lat: number; lng: number; heading: number; speedKmh: number;
 /** Interpolated camera rig state (ground-anchored target + spherical offset). */
 interface Rig { lat: number; lng: number; heading: number; pitch: number; range: number }
 
-const SMOOTH = 0.09;            // per-frame easing toward goal (0..1)
+// Easing rate toward the goal, per second (≈0.09/frame at 60 fps). Time-based,
+// so the camera trails the vehicle by the same distance at any frame rate — a
+// per-frame factor let slow GPUs fall hundreds of metres behind (vehicle
+// off-screen).
+const SMOOTH_PER_SEC = 5.5;
 const M_PER_DEG = 111_320;
 
 /** Shortest signed angular delta a→b, in radians (handles 180° wraparound). */
@@ -35,6 +39,7 @@ export class CameraController {
   private vehicle: Vehicle | null = null;
   private rig: Rig | null = null;
   private raf = 0;
+  private lastFrame = 0;
   private disposed = false;
 
   constructor(widget: CesiumWidget) {
@@ -98,8 +103,12 @@ export class CameraController {
     return { lat: v.lat, lng: v.lng, heading: hdg, pitch: -0.52, range: 550 };
   }
 
-  private loop(): void {
+  private loop(now: number): void {
     if (this.disposed) return;
+    // Clamp dt so a backgrounded tab doesn't snap on return.
+    const dt = this.lastFrame ? Math.min(0.25, (now - this.lastFrame) / 1000) : 1 / 60;
+    this.lastFrame = now;
+    const SMOOTH = 1 - Math.exp(-SMOOTH_PER_SEC * dt);
     if (this.mode !== "free") {
       const goal = this.goal();
       if (goal) {
