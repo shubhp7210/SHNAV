@@ -45,7 +45,8 @@ export default function Auth() {
       setFailedAttempts(0);
       setLockedUntil(null);
       navigate("/dashboard", { replace: true });
-    } catch (err: any) {
+    } catch (e: unknown) {
+      const err = e as { message?: string; code?: string };
       if (err.message?.toLowerCase().includes("email not confirmed") || err.code === "email_not_confirmed") {
         setUnconfirmedEmail(email);
       } else {
@@ -99,7 +100,8 @@ export default function Auth() {
       if (error) throw error;
       toast({ title: "Account created", description: "Check your email to confirm, then sign in." });
       setScreen("login");
-    } catch (err: any) {
+    } catch (e: unknown) {
+      const err = e as { message?: string };
       toast({ title: "Sign up failed", description: err.message, variant: "destructive" });
     } finally {
       setLoading(false);
@@ -116,7 +118,8 @@ export default function Auth() {
       });
       if (error) throw error;
       setScreen("reset-sent");
-    } catch (err: any) {
+    } catch (e: unknown) {
+      const err = e as { message?: string };
       toast({ title: "Error", description: err.message, variant: "destructive" });
     } finally {
       setLoading(false);
@@ -129,7 +132,8 @@ export default function Auth() {
       const { error } = await supabase.auth.resend({ type: "signup", email: unconfirmedEmail });
       if (error) throw error;
       toast({ title: "Email sent", description: "Confirmation email resent." });
-    } catch (err: any) {
+    } catch (e: unknown) {
+      const err = e as { message?: string };
       toast({ title: "Error", description: err.message, variant: "destructive" });
     } finally {
       setLoading(false);
@@ -145,7 +149,8 @@ export default function Auth() {
       });
       if (error) throw error;
       // page will redirect to Google — no need to setLoading(false)
-    } catch (err: any) {
+    } catch (e: unknown) {
+      const err = e as { message?: string };
       toast({ title: "Google sign-in failed", description: err.message, variant: "destructive" });
       setLoading(false);
     }
@@ -153,11 +158,11 @@ export default function Auth() {
 
   // ── Layout wrapper ─────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4 relative overflow-hidden">
+    <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4 relative isolate overflow-hidden">
       <div className="absolute inset-0 -z-10 grid-pattern opacity-30 pointer-events-none" />
       <div
         className="absolute top-0 left-1/2 -translate-x-1/2 w-[80%] h-[40vh] -z-10 pointer-events-none"
-        style={{ background: "radial-gradient(ellipse at top center, hsl(5 72% 50% / 0.06), transparent 70%)" }}
+        style={{ background: "radial-gradient(ellipse at top center, hsl(var(--primary) / 0.10), transparent 70%)" }}
       />
 
       <motion.div
@@ -181,7 +186,7 @@ export default function Auth() {
             className="w-full max-w-sm"
           >
             {unconfirmedEmail && (
-              <div className="mb-4 p-4 rounded-xl border border-amber-500/30 bg-amber-500/8 space-y-2">
+              <div className="mb-4 p-4 rounded-xl border border-amber-500/30 bg-amber-500/10 space-y-2">
                 <p className="text-sm font-medium text-amber-400">Email not confirmed</p>
                 <p className="text-xs text-muted-foreground">
                   Confirm <span className="font-mono text-foreground">{unconfirmedEmail}</span> to sign in.
@@ -203,7 +208,7 @@ export default function Auth() {
               <p className="text-sm text-muted-foreground mt-1">Sign in to your SHNAV operator account.</p>
             </div>
 
-            <form onSubmit={handleLogin} className="glass-card rounded-2xl p-6 space-y-4">
+            <form onSubmit={handleLogin} className="panel rounded-2xl p-6 shadow-elev space-y-4">
               <div>
                 <label className="text-[11px] font-mono text-muted-foreground mb-1.5 block tracking-widest uppercase">Email</label>
                 <div className="relative">
@@ -214,7 +219,7 @@ export default function Auth() {
                     onChange={(e) => setEmail(e.target.value)}
                     required
                     placeholder="pilot@shnav.air"
-                    className="w-full bg-secondary border border-border rounded-lg pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    className="w-full bg-background/60 border border-border rounded-lg pl-9 pr-3 h-11 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                   />
                 </div>
               </div>
@@ -239,7 +244,7 @@ export default function Auth() {
                     required
                     placeholder="••••••••"
                     minLength={6}
-                    className="w-full bg-secondary border border-border rounded-lg pl-9 pr-10 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    className="w-full bg-background/60 border border-border rounded-lg pl-9 pr-10 h-11 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                   />
                   <button type="button" onClick={() => setShowPw((p) => !p)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
                     {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -248,7 +253,7 @@ export default function Auth() {
               </div>
 
               {isLockedOut && (
-                <div className="p-3 rounded-lg border border-destructive/30 bg-destructive/8">
+                <div className="p-3 rounded-lg border border-destructive/30 bg-destructive/10">
                   <p className="text-xs text-destructive font-mono">Account locked — retry in {lockoutSecondsLeft}s</p>
                 </div>
               )}
@@ -312,7 +317,7 @@ export default function Auth() {
               <p className="text-sm text-muted-foreground mt-1">Start with your login credentials.</p>
             </div>
 
-            <form onSubmit={handleSignupStep1} className="glass-card rounded-2xl p-6 space-y-4">
+            <form onSubmit={handleSignupStep1} className="panel rounded-2xl p-6 shadow-elev space-y-4">
               <div>
                 <label className="text-[11px] font-mono text-muted-foreground mb-1.5 block tracking-widest uppercase">Email</label>
                 <div className="relative">
@@ -323,7 +328,7 @@ export default function Auth() {
                     onChange={(e) => setEmail(e.target.value)}
                     required
                     placeholder="pilot@shnav.air"
-                    className="w-full bg-secondary border border-border rounded-lg pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    className="w-full bg-background/60 border border-border rounded-lg pl-9 pr-3 h-11 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                   />
                 </div>
               </div>
@@ -339,7 +344,7 @@ export default function Auth() {
                     required
                     placeholder="Min. 6 characters"
                     minLength={6}
-                    className="w-full bg-secondary border border-border rounded-lg pl-9 pr-10 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    className="w-full bg-background/60 border border-border rounded-lg pl-9 pr-10 h-11 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                   />
                   <button type="button" onClick={() => setShowPw((p) => !p)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
                     {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -386,7 +391,7 @@ export default function Auth() {
               <p className="text-sm text-muted-foreground mt-1">Tell us about your operation.</p>
             </div>
 
-            <form onSubmit={handleSignupStep2} className="glass-card rounded-2xl p-6 space-y-4">
+            <form onSubmit={handleSignupStep2} className="panel rounded-2xl p-6 shadow-elev space-y-4">
               <div>
                 <label className="text-[11px] font-mono text-muted-foreground mb-1.5 block tracking-widest uppercase">Operator Name</label>
                 <div className="relative">
@@ -396,7 +401,7 @@ export default function Auth() {
                     value={operatorName}
                     onChange={(e) => setOperatorName(e.target.value)}
                     placeholder="e.g. SkyLink Operations"
-                    className="w-full bg-secondary border border-border rounded-lg pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    className="w-full bg-background/60 border border-border rounded-lg pl-9 pr-3 h-11 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                   />
                 </div>
               </div>
@@ -410,7 +415,7 @@ export default function Auth() {
                     value={aircraftId}
                     onChange={(e) => setAircraftId(e.target.value)}
                     placeholder="e.g. N-VTOL-4827"
-                    className="w-full bg-secondary border border-border rounded-lg pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary font-mono"
+                    className="w-full bg-background/60 border border-border rounded-lg pl-9 pr-3 h-11 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary font-mono"
                   />
                 </div>
               </div>
@@ -454,7 +459,7 @@ export default function Auth() {
               <p className="text-sm text-muted-foreground mt-1">We'll send a reset link to your email.</p>
             </div>
 
-            <form onSubmit={handleReset} className="glass-card rounded-2xl p-6 space-y-4">
+            <form onSubmit={handleReset} className="panel rounded-2xl p-6 shadow-elev space-y-4">
               <div>
                 <label className="text-[11px] font-mono text-muted-foreground mb-1.5 block tracking-widest uppercase">Email</label>
                 <div className="relative">
@@ -465,7 +470,7 @@ export default function Auth() {
                     onChange={(e) => setEmail(e.target.value)}
                     required
                     placeholder="pilot@shnav.air"
-                    className="w-full bg-secondary border border-border rounded-lg pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    className="w-full bg-background/60 border border-border rounded-lg pl-9 pr-3 h-11 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                   />
                 </div>
               </div>

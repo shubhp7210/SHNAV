@@ -39,7 +39,7 @@ export default function TopDock() {
           className={`pointer-events-auto flex items-center gap-1 rounded-full px-2 py-2 transition-all duration-300 ${
             scrolled
               ? "bg-background/75 border border-white/10 backdrop-blur-xl shadow-[0_8px_32px_-12px_rgba(0,0,0,0.7)]"
-              : "bg-background/25 border border-white/6 backdrop-blur-md"
+              : "bg-background/40 border border-white/10 backdrop-blur-md"
           }`}
         >
           <Link to="/" className="flex items-center pl-2 pr-3 py-0.5">
@@ -60,7 +60,7 @@ export default function TopDock() {
                   {active && (
                     <motion.span
                       layoutId="dock-pill"
-                      className="absolute inset-0 rounded-full bg-white/7 border border-white/10"
+                      className="absolute inset-0 rounded-full bg-white/10 border border-white/10"
                       transition={{ type: "spring", stiffness: 380, damping: 30 }}
                     />
                   )}
@@ -72,7 +72,7 @@ export default function TopDock() {
 
           <button
             onClick={() => navigate(session ? "/dashboard" : "/auth")}
-            className="hidden md:inline-flex items-center gap-1 ml-1 pl-3.5 pr-3 py-1.5 rounded-full bg-primary text-primary-foreground text-[12px] font-semibold hover:bg-primary/88 transition-colors"
+            className="hidden md:inline-flex items-center gap-1 ml-1 pl-3.5 pr-3 py-1.5 rounded-full bg-primary text-primary-foreground text-[12px] font-semibold hover:bg-primary/90 transition-colors"
           >
             {session ? "Open" : "Launch"}
             <ArrowUpRight className="w-3 h-3" strokeWidth={2.5} />
@@ -95,7 +95,7 @@ export default function TopDock() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[60] md:hidden bg-background/96 backdrop-blur-xl flex flex-col"
+            className="fixed inset-0 z-[60] md:hidden bg-background/95 backdrop-blur-xl flex flex-col"
           >
             <div className="flex items-center justify-between p-4">
               <Logo size={24} compact />

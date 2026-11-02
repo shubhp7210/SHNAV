@@ -26,7 +26,7 @@ const DECISION_CONFIG: Record<FlightDecision, DecisionConfig> = {
     // Decision-support recommendation, NOT a real operational clearance — no UAM
     // ATC authority backs this. Honest wording per the project's no-false-certainty rule.
     label: "PROCEED — RECOMMENDED",
-    bg: "from-emerald-900/60 to-emerald-800/30",
+    bg: "from-emerald-950/80 via-emerald-900/30 to-card",
     border: "border-emerald-500/50",
     glow: "shadow-emerald-500/20",
     iconColor: "text-emerald-400",
@@ -36,7 +36,7 @@ const DECISION_CONFIG: Record<FlightDecision, DecisionConfig> = {
   DELAY: {
     icon: Clock,
     label: "DELAY ISSUED",
-    bg: "from-amber-900/60 to-amber-800/30",
+    bg: "from-amber-950/80 via-amber-900/30 to-card",
     border: "border-amber-500/50",
     glow: "shadow-amber-500/20",
     iconColor: "text-amber-400",
@@ -46,7 +46,7 @@ const DECISION_CONFIG: Record<FlightDecision, DecisionConfig> = {
   REROUTE: {
     icon: RefreshCw,
     label: "REROUTE REQUIRED",
-    bg: "from-sky-900/60 to-sky-800/30",
+    bg: "from-sky-950/80 via-sky-900/30 to-card",
     border: "border-sky-500/50",
     glow: "shadow-sky-500/20",
     iconColor: "text-sky-400",
@@ -59,7 +59,7 @@ export default function FlightDecisionPanel({ decision, loading }: Props) {
   const [showDetails, setShowDetails] = useState(false);
   if (loading) {
     return (
-      <div className="rounded-xl border border-white/10 bg-white/5 p-6 animate-pulse">
+      <div className="panel rounded-2xl p-6 animate-pulse">
         <div className="h-8 w-48 bg-white/10 rounded mb-4" />
         <div className="h-4 w-full bg-white/10 rounded mb-2" />
         <div className="h-4 w-3/4 bg-white/10 rounded" />
@@ -77,29 +77,29 @@ export default function FlightDecisionPanel({ decision, loading }: Props) {
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5 }}
-      className={`rounded-xl border ${cfg.border} bg-gradient-to-br ${cfg.bg} shadow-xl ${cfg.glow} overflow-hidden`}
+      className={`rounded-2xl border ${cfg.border} bg-gradient-to-br ${cfg.bg} shadow-elev ${cfg.glow} overflow-hidden`}
     >
       {/* Header */}
-      <div className="flex items-center gap-4 p-5 border-b border-white/10">
+      <div className="flex items-center gap-3 sm:gap-4 p-4 sm:p-5 border-b border-border">
         <motion.div
           animate={{ scale: [1, 1.08, 1] }}
           transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-          className={`p-3 rounded-full bg-black/20 ${cfg.iconColor}`}
+          className={`p-3 rounded-full well shrink-0 hidden sm:block ${cfg.iconColor}`}
         >
           <Icon className="w-7 h-7" />
         </motion.div>
-        <div>
-          <div className="flex items-center gap-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
             <span className={`text-xs font-bold px-2 py-0.5 rounded-full text-white ${cfg.badgeBg}`}>
               ATM DECISION
             </span>
             <span className="text-xs text-white/40">AUTO-GENERATED</span>
           </div>
-          <h2 className="text-2xl font-black text-white tracking-wide mt-0.5">{cfg.label}</h2>
+          <h2 className="font-display text-xl sm:text-2xl font-semibold text-white tracking-tight mt-1 leading-tight">{cfg.label}</h2>
         </div>
 
         {/* Confidence ring */}
-        <div className="ml-auto text-center">
+        <div className="ml-auto text-center shrink-0">
           <div className="relative w-14 h-14">
             <svg viewBox="0 0 56 56" className="w-full h-full -rotate-90">
               <circle cx="28" cy="28" r="22" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="4" />
@@ -120,20 +120,20 @@ export default function FlightDecisionPanel({ decision, loading }: Props) {
       </div>
 
       {/* Decision details */}
-      <div className="p-5 space-y-4">
+      <div className="p-4 sm:p-5 space-y-4">
         {/* Reason */}
         <p className="text-sm text-white/80 leading-relaxed">{decision.reason}</p>
 
         {/* Essential info — clean two-up */}
         <div className="grid grid-cols-2 gap-3">
-          <div className="bg-black/20 rounded-lg p-3">
+          <div className="well rounded-lg p-3">
             <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Departure</p>
             <p className="text-base font-bold text-white">{depStr}</p>
             {decision.delay_minutes > 0 && (
               <p className="text-xs text-amber-400">+{decision.delay_minutes} min hold</p>
             )}
           </div>
-          <div className="bg-black/20 rounded-lg p-3">
+          <div className="well rounded-lg p-3">
             <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Status</p>
             <p className="text-base font-bold text-white flex items-center gap-1.5">
               {decision.simulation.safe ? <Shield className="w-4 h-4 text-emerald-400" /> : <AlertTriangle className="w-4 h-4 text-amber-400" />}
@@ -152,16 +152,18 @@ export default function FlightDecisionPanel({ decision, loading }: Props) {
           {showDetails ? "Hide" : "Show"} technical details
         </button>
         {showDetails && (
-          <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-white/60 border-t border-white/10 pt-3">
+          <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-white/60 border-t border-border pt-3">
             <div>Trajectory: <span className="text-white">{decision.inputs_summary.trajectory_score}/100</span></div>
             <div>Conflicts: <span className="text-white">{decision.inputs_summary.conflicts}</span></div>
-            <div>Airspace load: <span className="text-white">{decision.inputs_summary.airspace_load}%</span></div>
-            <div>Route score: <span className="text-white">{decision.inputs_summary.route_score}/100</span></div>
+            <div>Airspace load: <span className="text-white">{decision.inputs_summary.airspace_load != null ? `${decision.inputs_summary.airspace_load}%` : "not assessed"}</span></div>
+            <div>Route score: <span className="text-white">{decision.inputs_summary.route_score != null ? `${decision.inputs_summary.route_score}/100` : "—"}</span></div>
+            <div>Weather risk: <span className="text-white">{decision.inputs_summary.weather_risk_score != null ? `${decision.inputs_summary.weather_risk_score}/100` : "unavailable"}</span></div>
+            <div>Vertiport delay: <span className="text-white">{decision.inputs_summary.vertiport_delay != null ? `${decision.inputs_summary.vertiport_delay} min` : "not assessed"}</span></div>
           </div>
         )}
 
         {/* Honest framing: this is decision support, not an operational clearance. */}
-        <p className="text-[10px] font-mono text-white/35 border-t border-white/10 pt-2 leading-relaxed">
+        <p className="text-[10px] font-mono text-white/35 border-t border-border pt-2 leading-relaxed">
           Decision support for a simulated UAM network — not an operational ATC clearance.
           Verify against authorized sources before any real flight.
         </p>

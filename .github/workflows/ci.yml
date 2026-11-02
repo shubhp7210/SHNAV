@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]   # main is tested by deploy.yml before deploying
+  workflow_call:
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npx tsc --noEmit -p tsconfig.app.json
+      - run: npx eslint src supabase/functions scripts
+      - run: npm test
+      - run: npm run build
+
+  edge-functions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with: { deno-version: v2.x }
+      - name: Type-check every edge function
+        working-directory: supabase/functions
+        run: deno check */index.ts
+      - name: Live external API checks (Open-Meteo, Nominatim)
+        continue-on-error: true   # third-party availability must not block merges
+        run: deno test --allow-net supabase/tests/live_apis.test.ts
+
+  database:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env: { POSTGRES_PASSWORD: postgres }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Apply all migrations + concurrency, privilege and rollback tests
+        env: { DATABASE_URL: "postgres://postgres:postgres@localhost:5432/postgres" }
+        run: npm run test:db

@@ -1,3 +1,4 @@
+import { reportClientError } from "@/lib/errorReporter";
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { AlertTriangle, RotateCw } from "lucide-react";
 
@@ -22,10 +23,11 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    // Surface to the console so the developer/devtools can inspect.
-    // In production this is the only signal we have — replace with a
-    // remote logger (Sentry, Logtail, etc.) when one is wired up.
     console.error("[ErrorBoundary] uncaught render error", error, info.componentStack);
+    // Remote capture → error_events (alerts fire on spikes).
+    const e = new Error(error.message);
+    e.stack = `${error.stack ?? ""}\nComponent stack:${info.componentStack ?? ""}`;
+    reportClientError(e, "boundary", "fatal");
   }
 
   private handleReset = (): void => {

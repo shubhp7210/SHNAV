@@ -15,10 +15,10 @@ export default function AirspaceSchedulePanel({ schedule }: Props) {
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, delay: 0.15 }}
-      className="rounded-xl border border-white/10 bg-white/5 overflow-hidden"
+      className="panel rounded-2xl overflow-hidden"
     >
-      <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
-        <span className="text-xs font-semibold text-white/60 uppercase tracking-widest">Airspace Schedule</span>
+      <div className="flex items-center justify-between px-5 py-3 border-b border-border">
+        <span className="label-caps text-foreground/75">Airspace Schedule</span>
         <span className={`text-xs font-bold ${schedule.allocated ? "text-emerald-400" : "text-amber-400"}`}>
           {schedule.allocated ? "SLOT RESERVED" : "DELAYED"}
         </span>
@@ -58,7 +58,7 @@ export default function AirspaceSchedulePanel({ schedule }: Props) {
 
         {/* Allocated time */}
         <div className="grid grid-cols-2 gap-3">
-          <div className="bg-black/20 rounded-lg p-3">
+          <div className="well rounded-lg p-3">
             <p className="text-[10px] text-white/40 mb-1 flex items-center gap-1"><Clock className="w-3 h-3" /> Allocated Slot</p>
             <p className="text-sm font-bold text-white">
               {new Date(schedule.allocated_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -67,7 +67,7 @@ export default function AirspaceSchedulePanel({ schedule }: Props) {
               <p className="text-xs text-amber-400">+{schedule.delay_minutes} min</p>
             )}
           </div>
-          <div className="bg-black/20 rounded-lg p-3">
+          <div className="well rounded-lg p-3">
             <p className="text-[10px] text-white/40 mb-1">Competing Flights</p>
             <p className="text-sm font-bold text-white">{schedule.competing_flights}</p>
             <p className="text-[10px] text-white/30">same altitude band</p>

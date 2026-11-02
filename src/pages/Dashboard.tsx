@@ -2,19 +2,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Plane, LogOut, Plus, Activity, AlertTriangle,
-  TrendingUp, ArrowRight, Clock, BarChart3,
-  CheckCircle2, AlertCircle, Loader,
-  CheckCircle, Navigation, Shield, Wind,
-  Radio, Cpu, MapPin, Zap, ChevronRight, Home,
+  Plane, LogOut, Plus, AlertTriangle, TrendingUp, ArrowRight, Clock, BarChart3,
+  CheckCircle2, AlertCircle, CheckCircle, Navigation, ChevronRight, MapPin,
+  Crosshair, LocateFixed, X, Radio,
 } from "lucide-react";
-import { useUserCenter } from "@/lib/useUserCenter";
-import { centerInRegion } from "@/lib/geo/region";
-import MapView, { type Pt } from "@/components/MapView";
+import MapView from "@/components/MapView";
+import type { FrameRequest } from "@/components/CesiumMap";
+import Logo from "@/components/Logo";
+import { MANHATTAN_VIEW, type Pt } from "@/lib/geo/region";
+import { locationCoords } from "@/lib/geo/coords";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
-import { useToast } from "@/hooks/use-toast";
-import { BYPASS_AUTH } from "@/components/AuthGuard";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface FlightRecord {
@@ -40,136 +38,201 @@ interface HistoricalFlight {
   landed_at: string | null;
   archived_at: string;
 }
-interface Vertiport {
-  name: string;
-  lat: number;
-  lon: number;
-}
-interface MapRoute {
-  from: [number, number];
-  to: [number, number];
-  status: string;
-}
+interface Vertiport { name: string; lat: number; lon: number }
+/** A flight that has real coordinates for both ends. */
+interface MappedFlight { id: string; poly: Pt[] }
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; dot: string }> = {
-  pending:   { label: "Pending",   color: "text-amber-400",   dot: "bg-amber-400" },
-  scheduled: { label: "Scheduled", color: "text-sky-400",     dot: "bg-sky-400" },
-  approved:  { label: "Approved",  color: "text-emerald-400", dot: "bg-emerald-400" },
-  boarding:  { label: "Boarding",  color: "text-violet-400",  dot: "bg-violet-400 animate-pulse" },
-  in_air:    { label: "In Air",    color: "text-cyan-400",    dot: "bg-cyan-400 animate-pulse" },
-  active:    { label: "Active",    color: "text-cyan-400",    dot: "bg-cyan-400 animate-pulse" },
-  analyzing: { label: "Analyzing", color: "text-blue-400",    dot: "bg-blue-400 animate-pulse" },
-  landed:    { label: "Landed",    color: "text-zinc-400",    dot: "bg-zinc-400" },
-  archived:  { label: "Archived",  color: "text-zinc-500",    dot: "bg-zinc-500" },
-  completed: { label: "Completed", color: "text-zinc-500",    dot: "bg-zinc-500" },
+  pending:   { label: "Pending",   color: "text-caution",       dot: "bg-caution" },
+  scheduled: { label: "Scheduled", color: "text-signal",        dot: "bg-signal" },
+  approved:  { label: "Approved",  color: "text-success",       dot: "bg-success" },
+  boarding:  { label: "Boarding",  color: "text-violet-300",    dot: "bg-violet-300 animate-pulse" },
+  in_air:    { label: "In Air",    color: "text-signal",        dot: "bg-signal animate-pulse" },
+  active:    { label: "Active",    color: "text-signal",        dot: "bg-signal animate-pulse" },
+  analyzing: { label: "Analyzing", color: "text-sky-300",       dot: "bg-sky-300 animate-pulse" },
+  landed:    { label: "Landed",    color: "text-muted-foreground", dot: "bg-muted-foreground" },
+  archived:  { label: "Archived",  color: "text-muted-foreground", dot: "bg-muted-foreground" },
+  completed: { label: "Completed", color: "text-muted-foreground", dot: "bg-muted-foreground" },
 };
+const statusOf = (s: string) => STATUS_CONFIG[s] ?? STATUS_CONFIG.pending;
 
-const ATM_SYSTEMS = [
-  { id: "weather",   label: "Weather Intel",      icon: Wind,   },
-  { id: "airspace",  label: "Airspace Scheduler", icon: Radio,  },
-  { id: "vertiport", label: "Vertiport Coord.",   icon: MapPin, },
-  { id: "traj",      label: "Trajectory Pred.",   icon: Cpu,    },
-  { id: "decision",  label: "Decision Engine",    icon: Zap,    },
-];
+/** Strip the "@ lat,lon" geocode tag for display. */
+const placeName = (loc: string) => (loc ?? "").replace(/\s*@\s*-?\d+\.?\d*\s*,\s*-?\d+\.?\d*\s*$/, "") || "—";
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/** Origins/destinations picked via location search carry "name @ lat,lon". */
-function parseTaggedCoords(loc: string): { lat: number; lon: number } | null {
-  const m = loc?.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (!m) return null;
-  const lat = parseFloat(m[1]);
-  const lon = parseFloat(m[2]);
-  return Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null;
-}
+const scoreColor = (score: number) => (score >= 80 ? "hsl(var(--success))" : score >= 60 ? "hsl(var(--caution))" : "hsl(var(--destructive))");
 
 function ScoreRing({ score, size = 44 }: { score: number; size?: number }) {
-  const r = size / 2 - 5;
+  const r = size / 2 - 4;
   const circ = 2 * Math.PI * r;
-  const dash = (score / 100) * circ;
-  const color = score >= 80 ? "#34d399" : score >= 60 ? "#fbbf24" : "#f87171";
+  const dash = (Math.max(0, Math.min(100, score)) / 100) * circ;
+  const color = scoreColor(score);
   return (
-    <div className="relative flex items-center justify-center flex-shrink-0" style={{ width: size, height: size }}>
-      <svg className="absolute inset-0 -rotate-90" width={size} height={size}>
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="3" />
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth="3"
+    <div className="relative flex items-center justify-center flex-shrink-0" style={{ width: size, height: size }} aria-label={`Score ${score}`}>
+      <svg className="absolute inset-0 -rotate-90" width={size} height={size} aria-hidden="true">
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="hsl(var(--border))" strokeWidth="3" />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth="3"
           strokeDasharray={`${dash} ${circ}`} strokeLinecap="round"
           style={{ transition: "stroke-dasharray 0.9s ease" }} />
       </svg>
-      <span className="text-[11px] font-bold font-mono" style={{ color }}>{score}</span>
+      <span className="text-[11px] font-bold font-mono tabular" style={{ color }}>{score}</span>
     </div>
   );
 }
 
-// ── Map component ─────────────────────────────────────────────────────────────
-// Thin adapter: converts the dashboard's MapRoute[] ({from,to,status} in [lng,lat])
-// into the renderer-agnostic {lat,lng} route shape and hands off to <MapView/>,
-// which picks the Cesium 3D renderer (WebGL) or the canvas fallback.
-export function OpsMap({ interactive = false, routes }: { interactive?: boolean; routes?: MapRoute[] }) {
-  // Demo route centers on the user's location when it's inside the North
-  // American operating region; otherwise NYC.
-  const [clng, clat] = centerInRegion(useUserCenter());
-  const r3d = useMemo<Pt[][]>(() => routes && routes.length > 0
-    ? routes.map((r) => [{ lat: r.from[1], lng: r.from[0] }, { lat: r.to[1], lng: r.to[0] }])
-    : [[{ lat: clat - 0.02, lng: clng - 0.025 }, { lat: clat + 0.03, lng: clng + 0.02 }]],
-  [routes, clat, clng]);
-  return <MapView routes={r3d} animate rotate={!interactive} interactive={interactive} label="Operations map" />;
+function Spinner({ label = "Loading…" }: { label?: string }) {
+  return (
+    <div className="flex items-center gap-2 py-6 justify-center" role="status">
+      <span className="w-4 h-4 rounded-full border-2 border-border border-t-signal animate-spin" />
+      <span className="text-[11px] font-mono text-muted-foreground">{label}</span>
+    </div>
+  );
+}
+
+// ── Map ───────────────────────────────────────────────────────────────────────
+/** Operations map: always opens on Manhattan. Shows real flights only — when no
+ *  flight has coordinates, the map is empty rather than showing invented routes. */
+export function OpsMap({
+  routes = [], interactive = true, frame,
+}: { routes?: Pt[][]; interactive?: boolean; frame?: FrameRequest }) {
+  return (
+    <MapView
+      routes={routes}
+      initialView={MANHATTAN_VIEW}
+      interactive={interactive}
+      frame={frame}
+      label="Operations map"
+    />
+  );
+}
+
+function MapControls({ onFrame, onReset, canFrame }: { onFrame: () => void; onReset: () => void; canFrame: boolean }) {
+  return (
+    <div className="flex items-center gap-1.5 pointer-events-auto">
+      <button
+        onClick={onFrame}
+        disabled={!canFrame}
+        className="glass-panel rounded-lg h-9 px-3 flex items-center gap-1.5 text-[11px] font-medium text-foreground/80 hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        title="Fit all mapped flights"
+      >
+        <Crosshair className="w-3.5 h-3.5" /> Frame flights
+      </button>
+      <button
+        onClick={onReset}
+        className="glass-panel rounded-lg h-9 w-9 flex items-center justify-center text-foreground/80 hover:text-foreground transition-colors"
+        title="Reset to Manhattan" aria-label="Reset view to Manhattan"
+      >
+        <LocateFixed className="w-3.5 h-3.5" />
+      </button>
+    </div>
+  );
+}
+
+// ── User menu (click-based: works on touch, keyboard-accessible) ─────────────
+function UserMenu({ name, email, onSignOut }: { name: string; email?: string; onSignOut: () => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu" aria-expanded={open} aria-label="Account menu"
+        className="w-9 h-9 rounded-full bg-primary/15 border border-primary/30 flex items-center justify-center hover:bg-primary/25 transition-colors"
+      >
+        <span className="text-xs font-bold text-primary">{name.slice(0, 2).toUpperCase()}</span>
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            role="menu"
+            initial={{ opacity: 0, y: -6, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -6, scale: 0.98 }}
+            transition={{ duration: 0.14 }}
+            className="absolute right-0 top-11 w-60 glass-panel rounded-xl p-1.5 z-50"
+          >
+            <div className="px-3 py-2.5 border-b border-border mb-1">
+              <p className="text-sm font-semibold truncate">{name}</p>
+              {email && <p className="text-[11px] text-muted-foreground truncate">{email}</p>}
+            </div>
+            <button
+              role="menuitem"
+              onClick={onSignOut}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-foreground/80 hover:bg-white/5 hover:text-foreground transition-colors"
+            >
+              <LogOut className="w-4 h-4" /> Sign out
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
 }
 
 // ── Main component ─────────────────────────────────────────────────────────────
 type Tab = "overview" | "flights" | "history";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "flights", label: "Flights" },
+  { id: "history", label: "History" },
+];
 
 export default function Dashboard() {
-  const { user, signOut, loading: authLoading } = useAuth();
+  const { user, signOut } = useAuth();
   const navigate = useNavigate();
-  const { toast } = useToast();
 
   const [tab, setTab] = useState<Tab>("overview");
   const [flights, setFlights] = useState<FlightRecord[]>([]);
   const [historical, setHistorical] = useState<HistoricalFlight[]>([]);
   const [loadingFlights, setLoadingFlights] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [decisions, setDecisions] = useState<{ decision: string; count: number }[]>([]);
-  const [selectedFlight, setSelectedFlight] = useState<FlightRecord | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [clock, setClock] = useState("");
-  const [vertiportMap, setVertiportMap] = useState<Record<string, { lat: number; lon: number }>>({});
+  const [vertiports, setVertiports] = useState<Vertiport[]>([]);
+  const [frame, setFrame] = useState<FrameRequest>({ key: 0 });
 
   useEffect(() => {
-    // Displayed with a "UTC" label — format in UTC, not local time.
-    const tick = () => setClock(new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "UTC" }));
+    const tick = () => setClock(new Date().toISOString().slice(11, 19));
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, []);
 
+  // AuthGuard already redirects signed-out users; this page only loads data.
   useEffect(() => {
-    if (BYPASS_AUTH) return;
-    if (!authLoading && !user) navigate("/auth", { replace: true });
-  }, [user, authLoading, navigate]);
-
-  useEffect(() => {
-    if (!user && !BYPASS_AUTH) return;
     let cancelled = false;
     setLoadingFlights(true);
-
     const load = async () => {
       try {
         const [intentsRes, historicalRes, decisionsRes, vertiportsRes] = await Promise.allSettled([
           supabase.from("flight_intents")
             .select("id,aircraft_id,origin,destination,trajectory_score,status,weather_risk,conflicts,created_at")
-            .not("status", "in", "(landed,archived)")
+            .not("status", "in", "(landed,archived,expired)")
             .order("created_at", { ascending: false })
             .limit(12),
           supabase.from("historical_flights")
             .select("id,aircraft_id,origin,destination,trajectory_score,weather_risk,conflicts,scheduled_departure,landed_at,archived_at")
             .order("archived_at", { ascending: false })
             .limit(30),
-          supabase.from("flight_decisions").select("decision"),
+          // Current decision per flight only (re-runs mark older ones superseded).
+          supabase.from("flight_decisions").select("decision").eq("superseded", false),
           supabase.from("vertiports").select("name,lat,lon").eq("is_active", true),
         ]);
         if (cancelled) return;
 
-        if (intentsRes.status === "fulfilled" && !intentsRes.value.error)
+        if (intentsRes.status === "fulfilled" && !intentsRes.value.error) {
           setFlights((intentsRes.value.data as FlightRecord[]) ?? []);
+        } else {
+          setLoadError("Flight data could not be loaded. Check your connection and refresh.");
+        }
         if (historicalRes.status === "fulfilled" && !historicalRes.value.error)
           setHistorical((historicalRes.value.data as HistoricalFlight[]) ?? []);
         if (decisionsRes.status === "fulfilled" && !decisionsRes.value.error) {
@@ -177,86 +240,104 @@ export default function Dashboard() {
           decisionsRes.value.data?.forEach((r: { decision: string }) => {
             counts[r.decision] = (counts[r.decision] ?? 0) + 1;
           });
-          setDecisions(Object.entries(counts).map(([decision, count]) => ({ decision, count: count as number })));
+          setDecisions(Object.entries(counts).map(([decision, count]) => ({ decision, count })));
         }
-        if (vertiportsRes.status === "fulfilled" && !vertiportsRes.value.error) {
-          const lookup: Record<string, { lat: number; lon: number }> = {};
-          (vertiportsRes.value.data as Vertiport[])?.forEach((v) => { lookup[v.name] = { lat: v.lat, lon: v.lon }; });
-          setVertiportMap(lookup);
-        }
+        if (vertiportsRes.status === "fulfilled" && !vertiportsRes.value.error)
+          setVertiports((vertiportsRes.value.data as Vertiport[]) ?? []);
       } finally {
         if (!cancelled) setLoadingFlights(false);
       }
     };
     void load();
     return () => { cancelled = true; };
-  }, [user, toast]);
+  }, [user]);
 
   const handleSignOut = async () => {
     await signOut();
     navigate("/", { replace: true });
   };
 
-  const total       = flights.length;
-  const avgScore    = total ? Math.round(flights.reduce((a, f) => a + (f.trajectory_score ?? 0), 0) / total) : null;
-  const conflicts   = flights.filter((f) => f.conflicts > 0).length;
+  const total = flights.length;
+  const avgScore = total ? Math.round(flights.reduce((a, f) => a + (f.trajectory_score ?? 0), 0) / total) : null;
+  const conflicts = flights.filter((f) => f.conflicts > 0).length;
   const safeFlights = flights.filter((f) => (f.trajectory_score ?? 0) >= 80).length;
   const activeCount = flights.filter((f) => ["active", "analyzing", "in_air"].includes(f.status)).length;
   const displayName = user?.user_metadata?.operator_name ?? user?.email?.split("@")[0] ?? "Pilot";
-  const initials    = displayName.slice(0, 2).toUpperCase();
+  const totalDecisions = decisions.reduce((a, x) => a + x.count, 0);
 
-  const mapRoutes = useMemo<MapRoute[]>(() => {
+  // Real coordinates only: geocoded "@ lat,lon" tags first, exact vertiport
+  // names as a fallback. Flights without either are listed but not mapped.
+  const mapped = useMemo<MappedFlight[]>(() => {
+    const byName: Record<string, Pt> = {};
+    vertiports.forEach((v) => { byName[v.name] = { lat: v.lat, lng: v.lon }; });
+    const tagged = (loc: string) => (/@/.test(loc) ? locationCoords(loc) : null);
     return flights.flatMap((f) => {
-      // Prefer the coordinates embedded in geocoded locations; exact
-      // vertiport-name match is only a fallback (origins are free text).
-      const from = parseTaggedCoords(f.origin) ?? vertiportMap[f.origin];
-      const to   = parseTaggedCoords(f.destination) ?? vertiportMap[f.destination];
-      if (!from || !to) return [];
-      return [{ from: [from.lon, from.lat] as [number, number], to: [to.lon, to.lat] as [number, number], status: f.status }];
+      const a = tagged(f.origin) ?? byName[f.origin];
+      const b = tagged(f.destination) ?? byName[f.destination];
+      return a && b ? [{ id: f.id, poly: [a, b] }] : [];
     });
-  }, [flights, vertiportMap]);
+  }, [flights, vertiports]);
+  const mappedIds = useMemo(() => new Set(mapped.map((m) => m.id)), [mapped]);
 
-  if (authLoading) {
-    return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
-        <motion.div animate={{ opacity: [0.4, 1, 0.4] }} transition={{ repeat: Infinity, duration: 1.5 }}>
-          <Plane className="w-5 h-5 text-primary" />
-        </motion.div>
+  // Selected flight drawn first (routes[0] is highlighted by the renderer).
+  const mapRoutes = useMemo<Pt[][]>(() => {
+    const sel = mapped.find((m) => m.id === selectedId);
+    return sel ? [sel.poly, ...mapped.filter((m) => m !== sel).map((m) => m.poly)] : mapped.map((m) => m.poly);
+  }, [mapped, selectedId]);
+
+  const selectedFlight = flights.find((f) => f.id === selectedId) ?? null;
+  const frameAll = () => setFrame((f) => ({ key: f.key + 1 }));
+  const resetView = () => setFrame((f) => ({ key: f.key + 1, view: MANHATTAN_VIEW }));
+  const selectFlight = (id: string | null) => {
+    setSelectedId(id);
+    const m = mapped.find((x) => x.id === id);
+    if (m) setFrame((f) => ({ key: f.key + 1, routes: [m.poly] }));
+  };
+
+  const mapOverlay = (
+    <>
+      <div className="absolute inset-0 pointer-events-none map-vignette" />
+      <div className="absolute top-3 left-3 right-3 flex items-start justify-between gap-2 pointer-events-none">
+        <div className="glass-panel rounded-lg px-3 py-2 flex items-center gap-2">
+          <span className={`w-1.5 h-1.5 rounded-full ${activeCount > 0 ? "bg-signal animate-pulse" : "bg-success"}`} />
+          <span className="font-mono text-[10px] tracking-[0.18em] text-foreground/80">MANHATTAN SECTOR</span>
+        </div>
+        <MapControls onFrame={frameAll} onReset={resetView} canFrame={mapped.length > 0} />
       </div>
-    );
-  }
-
-  const TABS: { id: Tab; label: string }[] = [
-    { id: "overview", label: "Overview" },
-    { id: "flights",  label: "Flights" },
-    { id: "history",  label: "History" },
-  ];
+      <div className="absolute bottom-3 left-3 pointer-events-none glass-panel rounded-lg px-3 py-2 text-[11px] font-mono text-foreground/70 tabular">
+        {loadingFlights ? "Loading flights…" : (
+          <>
+            {mapped.length} mapped{total - mapped.length > 0 && <span className="text-foreground/45"> · {total - mapped.length} without coordinates</span>}
+            {activeCount > 0 && <span className="text-signal"> · {activeCount} active</span>}
+          </>
+        )}
+      </div>
+    </>
+  );
 
   return (
-    <div className="h-screen bg-background flex flex-col overflow-hidden">
-
+    <div className="h-[100dvh] bg-background flex flex-col overflow-hidden pb-[calc(52px+env(safe-area-inset-bottom,0px))] md:pb-0">
       {/* ── Top bar ── */}
-      <header className="shrink-0 h-14 border-b border-border/30 bg-card/25 backdrop-blur-xl flex items-center px-4 gap-3 z-20">
-        {/* Home + Logo */}
-        <Link to="/" className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors mr-1" title="Back to home">
-          <Home className="w-4 h-4" />
+      <header className="shrink-0 h-14 border-b border-border bg-background/80 backdrop-blur-xl flex items-center px-3 sm:px-4 gap-2 sm:gap-4 z-20">
+        <Link to="/" className="flex items-center shrink-0" title="Back to home" aria-label="SHNAV home">
+          <Logo size={26} compact showWordmark={false} />
+          <span className="hidden lg:inline ml-2 font-display font-semibold text-sm tracking-wide">Operations</span>
         </Link>
-        <span className="font-bold text-sm tracking-[0.18em] text-primary mr-2 select-none">SHNAV</span>
 
-        {/* Tabs */}
-        <nav className="flex items-center gap-0.5 flex-1">
+        <nav className="flex items-center gap-0.5 flex-1 min-w-0 overflow-x-auto no-scrollbar" aria-label="Dashboard sections">
           {TABS.map(({ id, label }) => (
             <button
               key={id}
               onClick={() => setTab(id)}
-              className={`relative px-3.5 py-1.5 text-[12px] font-medium rounded-full transition-colors ${
+              aria-current={tab === id ? "page" : undefined}
+              className={`relative px-3 sm:px-3.5 py-1.5 text-[13px] font-medium rounded-full transition-colors shrink-0 ${
                 tab === id ? "text-foreground" : "text-muted-foreground hover:text-foreground"
               }`}
             >
               {tab === id && (
                 <motion.span
                   layoutId="tab-pill"
-                  className="absolute inset-0 rounded-full bg-white/7 border border-white/10"
+                  className="absolute inset-0 rounded-full bg-white/10 border border-white/10"
                   transition={{ type: "spring", stiffness: 400, damping: 32 }}
                 />
               )}
@@ -265,208 +346,170 @@ export default function Dashboard() {
           ))}
         </nav>
 
-        {/* Right: clock + user + plan btn */}
         <div className="flex items-center gap-2 shrink-0">
-          <div className="hidden sm:flex items-center gap-1.5 text-[11px] font-mono text-muted-foreground">
-            <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+          <div className="hidden md:flex items-center gap-1.5 text-[11px] font-mono text-muted-foreground tabular" aria-label="UTC time">
+            <span className="w-1.5 h-1.5 rounded-full bg-signal animate-pulse" />
             {clock} UTC
           </div>
           <button
             onClick={() => navigate("/plan")}
-            className="flex items-center gap-1.5 bg-primary text-primary-foreground rounded-lg px-3 py-1.5 text-xs font-semibold hover:bg-primary/90 transition-colors"
+            className="flex items-center gap-1.5 bg-primary text-primary-foreground rounded-full h-9 px-3 sm:px-4 text-xs font-semibold hover:brightness-110 transition"
           >
-            <Plus className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Plan Flight</span>
+            <Plus className="w-4 h-4" />
+            <span className="hidden sm:inline">Plan flight</span>
           </button>
-          <div className="w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center cursor-pointer hover:bg-primary/25 transition-colors group relative">
-            <span className="text-xs font-bold text-primary">{initials}</span>
-            <button
-              onClick={handleSignOut}
-              className="absolute inset-0 flex items-center justify-center rounded-full opacity-0 group-hover:opacity-100 bg-background/80 transition-opacity"
-              title="Sign out"
-            >
-              <LogOut className="w-3.5 h-3.5 text-muted-foreground" />
-            </button>
-          </div>
+          <UserMenu name={displayName} email={user?.email} onSignOut={handleSignOut} />
         </div>
       </header>
 
+      {loadError && (
+        <div className="shrink-0 px-4 py-2 bg-destructive/10 border-b border-destructive/30 text-xs text-destructive flex items-center gap-2" role="alert">
+          <AlertCircle className="w-3.5 h-3.5" /> {loadError}
+        </div>
+      )}
+
       {/* ── Tab panels ── */}
-      <div className="flex-1 overflow-hidden">
-        <AnimatePresence mode="wait">
+      <div className="flex-1 min-h-0 relative">
+        <AnimatePresence mode="wait" initial={false}>
 
           {/* ═══ OVERVIEW ═══ */}
           {tab === "overview" && (
             <motion.div
               key="overview"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className="h-full flex"
-              style={{ height: "calc(100vh - 56px)" }}
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden"
             >
-              {/* Left: live map (60%) */}
-              <div className="relative flex-[3] min-w-0">
-                <OpsMap routes={mapRoutes} />
-                {/* Map overlays */}
-                <div className="absolute inset-0 pointer-events-none"
-                  style={{ background: "radial-gradient(ellipse at 50% 50%, transparent 40%, rgba(4,9,18,0.45) 100%)" }} />
-                <div className="absolute top-3 left-3 flex items-center gap-1.5 bg-black/60 backdrop-blur-sm rounded-lg px-2.5 py-1.5 border border-white/10 pointer-events-none">
-                  <Activity className="w-3 h-3 text-primary" />
-                  <span className="text-[10px] font-mono text-white/70 tracking-widest">METRO AIRSPACE · LIVE</span>
-                </div>
-                <div className="absolute bottom-3 left-3 pointer-events-none">
-                  <div className="flex items-center gap-1.5">
-                    <div className={`w-1.5 h-1.5 rounded-full ${activeCount > 0 ? "bg-primary animate-pulse" : "bg-emerald-400"}`} />
-                    <span className="text-xs font-mono text-white/60">{activeCount > 0 ? `${activeCount} active` : "All clear"}</span>
-                  </div>
-                </div>
+              <div className="relative shrink-0 h-[46vh] min-h-[300px] lg:h-auto lg:flex-1 lg:min-w-0">
+                <OpsMap routes={mapRoutes} frame={frame} />
+                {mapOverlay}
               </div>
 
-              {/* Right: stats + decisions + recent (40%) */}
-              <div className="flex-[2] min-w-0 border-l border-border/30 overflow-y-auto bg-background/60 backdrop-blur-xl">
+              <aside className="lg:w-[420px] xl:w-[460px] lg:shrink-0 border-t lg:border-t-0 lg:border-l border-border lg:overflow-y-auto bg-background">
                 <div className="p-4 space-y-4">
-
-                  {/* 4 stats */}
+                  {/* KPI tiles */}
                   <div className="grid grid-cols-2 gap-2.5">
                     {[
-                      { icon: BarChart3,    label: "Flights",    value: total || "—",       color: "#06b6d4" },
-                      { icon: TrendingUp,   label: "Avg Score",  value: avgScore ?? "—",    color: avgScore !== null ? (avgScore >= 80 ? "#34d399" : avgScore >= 60 ? "#fbbf24" : "#f87171") : "#71717a" },
-                      { icon: CheckCircle2, label: "Safe",       value: total ? safeFlights : "—", color: "#34d399" },
-                      { icon: AlertTriangle,label: "Conflicts",  value: total ? conflicts : "—", color: conflicts > 0 ? "#f87171" : "#71717a" },
+                      { icon: BarChart3, label: "Open plans", value: total ? String(total) : "—", color: "hsl(var(--signal))" },
+                      { icon: TrendingUp, label: "Avg score", value: avgScore != null ? String(avgScore) : "—", color: avgScore != null ? scoreColor(avgScore) : "hsl(var(--muted-foreground))" },
+                      { icon: CheckCircle2, label: "Score ≥ 80", value: total ? String(safeFlights) : "—", color: "hsl(var(--success))" },
+                      { icon: AlertTriangle, label: "With conflicts", value: total ? String(conflicts) : "—", color: conflicts > 0 ? "hsl(var(--destructive))" : "hsl(var(--muted-foreground))" },
                     ].map(({ icon: Icon, label, value, color }) => (
-                      <div key={label} className="glass-card rounded-xl p-3.5">
+                      <div key={label} className="panel rounded-xl p-3.5">
                         <div className="flex items-center justify-between mb-2">
-                          <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">{label}</span>
+                          <span className="label-caps">{label}</span>
                           <Icon className="w-3.5 h-3.5" style={{ color }} />
                         </div>
-                        <p className="text-2xl font-bold font-mono" style={{ color }}>{value}</p>
+                        <p className="text-[28px] leading-none font-display font-semibold tabular" style={{ color }}>{value}</p>
                       </div>
                     ))}
                   </div>
 
                   {/* Decision outcomes */}
-                  <div className="glass-card rounded-xl p-4">
+                  <section className="panel rounded-xl p-4" aria-labelledby="dec-h">
                     <div className="flex items-center justify-between mb-3">
-                      <span className="text-xs font-semibold">Decision Outcomes</span>
-                      <Shield className="w-3.5 h-3.5 text-muted-foreground/40" />
+                      <h3 id="dec-h" className="text-sm font-semibold">Decision outcomes</h3>
+                      <span className="label-caps tabular">{totalDecisions} total</span>
                     </div>
-                    <div className="space-y-2.5">
-                      {[
-                        { key: "GO",      label: "Cleared GO", color: "#34d399", icon: CheckCircle },
-                        { key: "DELAY",   label: "Delayed",    color: "#fbbf24", icon: Clock },
-                        { key: "REROUTE", label: "Rerouted",   color: "#38bdf8", icon: Navigation },
-                      ].map(({ key, label, color, icon: Icon }) => {
-                        const count  = decisions.find(x => x.decision === key)?.count ?? 0;
-                        const totalD = decisions.reduce((a, x) => a + x.count, 0);
-                        const pct    = totalD > 0 ? (count / totalD) * 100 : 0;
-                        return (
-                          <div key={key} className="flex items-center gap-2.5">
-                            <Icon className="w-3.5 h-3.5 shrink-0" style={{ color }} />
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center justify-between mb-1">
-                                <span className="text-[11px] font-mono text-muted-foreground">{label}</span>
-                                <span className="text-[11px] font-bold font-mono" style={{ color }}>{count}</span>
-                              </div>
-                              <div className="h-1 rounded-full bg-secondary/60 overflow-hidden">
-                                <motion.div
-                                  initial={{ width: 0 }}
-                                  animate={{ width: `${pct}%` }}
-                                  transition={{ duration: 0.9, ease: "easeOut" }}
-                                  className="h-full rounded-full"
-                                  style={{ background: color }}
-                                />
+                    {totalDecisions === 0 ? (
+                      <p className="text-xs text-muted-foreground py-1">No decisions yet — they appear after a clearance analysis.</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {[
+                          { key: "GO", label: "Proceed", color: "hsl(var(--success))", icon: CheckCircle },
+                          { key: "DELAY", label: "Delayed", color: "hsl(var(--caution))", icon: Clock },
+                          { key: "REROUTE", label: "Rerouted", color: "hsl(var(--signal))", icon: Navigation },
+                        ].map(({ key, label, color, icon: Icon }) => {
+                          const count = decisions.find((x) => x.decision === key)?.count ?? 0;
+                          const pct = (count / totalDecisions) * 100;
+                          return (
+                            <div key={key} className="flex items-center gap-3">
+                              <Icon className="w-4 h-4 shrink-0" style={{ color }} />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between mb-1">
+                                  <span className="text-xs text-foreground/75">{label}</span>
+                                  <span className="text-xs font-mono font-semibold tabular" style={{ color }}>{count} · {Math.round(pct)}%</span>
+                                </div>
+                                <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
+                                  <motion.div initial={{ width: 0 }} animate={{ width: `${pct}%` }} transition={{ duration: 0.9, ease: "easeOut" }}
+                                    className="h-full rounded-full" style={{ background: color }} />
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        );
-                      })}
-                      {decisions.length === 0 && (
-                        <p className="text-[11px] font-mono text-muted-foreground text-center py-1">No decisions yet</p>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* System health */}
-                  <div className="glass-card rounded-xl p-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-xs font-semibold">ATM Systems</span>
-                      <div className="flex items-center gap-1">
-                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                        <span className="text-[10px] font-mono text-emerald-400">ALL ONLINE</span>
-                      </div>
-                    </div>
-                    <div className="space-y-1.5">
-                      {ATM_SYSTEMS.map(({ id, label, icon: Icon }) => (
-                        <div key={id} className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg bg-secondary/20">
-                          <Icon className="w-3 h-3 text-muted-foreground shrink-0" />
-                          <span className="text-[11px] font-mono text-foreground/75 flex-1">{label}</span>
-                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Recent flights */}
-                  <div>
-                    <div className="flex items-center justify-between mb-2.5">
-                      <span className="text-xs font-semibold">Recent Flights</span>
-                      <button onClick={() => setTab("flights")} className="text-[11px] font-mono text-primary hover:underline flex items-center gap-0.5">
-                        All <ChevronRight className="w-3 h-3" />
-                      </button>
-                    </div>
-                    {loadingFlights ? (
-                      <div className="flex items-center gap-2 py-4 justify-center">
-                        <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}>
-                          <Loader className="w-4 h-4 text-muted-foreground" />
-                        </motion.div>
-                        <span className="text-[11px] font-mono text-muted-foreground">Loading…</span>
-                      </div>
-                    ) : flights.length === 0 ? (
-                      <div className="glass-card rounded-xl p-5 text-center">
-                        <Plane className="w-6 h-6 text-muted-foreground/30 mx-auto mb-2" />
-                        <p className="text-xs text-muted-foreground">No flights yet</p>
-                        <button onClick={() => navigate("/plan")} className="mt-3 text-xs text-primary hover:underline font-mono">
-                          Plan your first flight →
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        {flights.slice(0, 4).map((f) => {
-                          const cfg = STATUS_CONFIG[f.status] ?? STATUS_CONFIG.pending;
-                          return (
-                            <button
-                              key={f.id}
-                              onClick={() => { setTab("flights"); setSelectedFlight(f); }}
-                              className="w-full glass-card rounded-xl px-3.5 py-3 flex items-center gap-3 hover:border-primary/20 transition-colors text-left"
-                            >
-                              <ScoreRing score={f.trajectory_score ?? 0} size={38} />
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-1 text-[12px]">
-                                  <span className="font-medium truncate">{f.origin}</span>
-                                  <ArrowRight className="w-3 h-3 text-primary shrink-0" />
-                                  <span className="truncate text-foreground/70">{f.destination}</span>
-                                </div>
-                                <div className="flex items-center gap-1.5 mt-0.5">
-                                  <div className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
-                                  <span className={`text-[10px] font-mono ${cfg.color}`}>{cfg.label}</span>
-                                  {f.conflicts > 0 && (
-                                    <span className="text-[10px] font-mono text-red-400 flex items-center gap-0.5">
-                                      <AlertCircle className="w-2.5 h-2.5" />{f.conflicts}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                            </button>
                           );
                         })}
                       </div>
                     )}
-                  </div>
+                  </section>
 
+                  {/* Network — real counts only */}
+                  <section className="panel rounded-xl p-4" aria-labelledby="net-h">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 id="net-h" className="text-sm font-semibold">Network</h3>
+                      <Radio className="w-3.5 h-3.5 text-muted-foreground" />
+                    </div>
+                    <dl className="grid grid-cols-3 gap-2">
+                      {[
+                        { label: "Vertiports", value: vertiports.length },
+                        { label: "Mapped", value: mapped.length },
+                        { label: "Archived", value: historical.length },
+                      ].map(({ label, value }) => (
+                        <div key={label} className="well rounded-lg px-3 py-2.5">
+                          <dt className="label-caps">{label}</dt>
+                          <dd className="text-lg font-display font-semibold tabular mt-0.5">{loadingFlights ? "—" : value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </section>
+
+                  {/* Recent flights */}
+                  <section aria-labelledby="recent-h">
+                    <div className="flex items-center justify-between mb-2.5">
+                      <h3 id="recent-h" className="text-sm font-semibold">Recent flights</h3>
+                      <button onClick={() => setTab("flights")} className="text-xs text-primary hover:underline flex items-center gap-0.5">
+                        View all <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    {loadingFlights ? <Spinner /> : flights.length === 0 ? (
+                      <EmptyFlights onPlan={() => navigate("/plan")} />
+                    ) : (
+                      <ul className="space-y-2">
+                        {flights.slice(0, 5).map((f) => {
+                          const cfg = statusOf(f.status);
+                          return (
+                            <li key={f.id}>
+                              <button
+                                onClick={() => { setTab("flights"); selectFlight(f.id); }}
+                                className="w-full panel rounded-xl px-3.5 py-3 flex items-center gap-3 hover:border-primary/30 transition-colors text-left"
+                              >
+                                <ScoreRing score={f.trajectory_score ?? 0} size={38} />
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-1.5 text-[13px]">
+                                    <span className="font-medium truncate">{placeName(f.origin)}</span>
+                                    <ArrowRight className="w-3 h-3 text-primary shrink-0" />
+                                    <span className="truncate text-foreground/70">{placeName(f.destination)}</span>
+                                  </div>
+                                  <div className="flex items-center gap-2 mt-1">
+                                    <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
+                                    <span className={`text-[11px] font-mono ${cfg.color}`}>{cfg.label}</span>
+                                    <span className="text-[11px] font-mono text-muted-foreground">{f.aircraft_id}</span>
+                                    {f.conflicts > 0 && (
+                                      <span className="text-[11px] font-mono text-destructive flex items-center gap-0.5">
+                                        <AlertCircle className="w-3 h-3" />{f.conflicts}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </section>
                 </div>
-              </div>
+              </aside>
             </motion.div>
           )}
 
@@ -474,136 +517,113 @@ export default function Dashboard() {
           {tab === "flights" && (
             <motion.div
               key="flights"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className="relative"
-              style={{ height: "calc(100vh - 56px)" }}
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0 flex flex-col md:block overflow-y-auto md:overflow-hidden"
             >
-              <OpsMap interactive />
+              <div className="relative shrink-0 h-[44vh] min-h-[280px] md:absolute md:inset-0 md:h-auto">
+                <OpsMap routes={mapRoutes} frame={frame} />
+                {mapOverlay}
+              </div>
 
-              {/* Gradient vignette */}
-              <div className="absolute inset-0 pointer-events-none"
-                style={{ background: "radial-gradient(ellipse at center, transparent 35%, rgba(4,9,18,0.3) 100%)" }} />
-
-              {/* Floating flight list — left */}
-              <div className="absolute left-3 top-3 bottom-3 w-64 flex flex-col gap-2 pointer-events-none">
-                <div className="glass-panel rounded-2xl flex flex-col overflow-hidden pointer-events-auto" style={{ maxHeight: "100%" }}>
-                  <div className="px-4 py-3 border-b border-border/30 flex items-center justify-between shrink-0">
-                    <span className="text-xs font-semibold">Active Flights</span>
-                    <span className="text-[10px] font-mono text-muted-foreground">{flights.length} plans</span>
+              {/* Flight list — floating on md+, stacked on mobile */}
+              <div className="md:absolute md:left-3 md:top-16 md:bottom-14 md:w-80 flex flex-col md:pointer-events-none">
+                <div className="md:glass-panel md:rounded-2xl flex flex-col overflow-hidden md:pointer-events-auto md:max-h-full border-t md:border-t-0 border-border">
+                  <div className="px-4 py-3 border-b border-border flex items-center justify-between shrink-0">
+                    <h3 className="text-sm font-semibold">Open flight plans</h3>
+                    <span className="label-caps tabular">{flights.length}</span>
                   </div>
                   <div className="overflow-y-auto flex-1">
-                    {loadingFlights ? (
-                      <div className="flex items-center justify-center gap-2 p-6">
-                        <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: "linear" }}>
-                          <Loader className="w-4 h-4 text-muted-foreground" />
-                        </motion.div>
-                      </div>
-                    ) : flights.length === 0 ? (
-                      <div className="p-6 text-center">
-                        <Plane className="w-5 h-5 text-muted-foreground/30 mx-auto mb-2" />
-                        <p className="text-[11px] text-muted-foreground">No active flights</p>
-                        <button onClick={() => navigate("/plan")} className="mt-2 text-[11px] text-primary hover:underline font-mono">
-                          Plan a flight →
-                        </button>
-                      </div>
+                    {loadingFlights ? <Spinner /> : flights.length === 0 ? (
+                      <div className="p-4"><EmptyFlights onPlan={() => navigate("/plan")} /></div>
                     ) : (
-                      <div className="divide-y divide-border/20">
+                      <ul className="divide-y divide-border">
                         {flights.map((f) => {
-                          const cfg = STATUS_CONFIG[f.status] ?? STATUS_CONFIG.pending;
-                          const sel = selectedFlight?.id === f.id;
+                          const cfg = statusOf(f.status);
+                          const sel = selectedId === f.id;
                           return (
-                            <button
-                              key={f.id}
-                              onClick={() => setSelectedFlight(sel ? null : f)}
-                              className={`w-full px-3.5 py-3 text-left transition-colors ${sel ? "bg-primary/10" : "hover:bg-secondary/30"}`}
-                            >
-                              <div className="flex items-center gap-2.5">
+                            <li key={f.id}>
+                              <button
+                                onClick={() => selectFlight(sel ? null : f.id)}
+                                aria-pressed={sel}
+                                className={`w-full px-4 py-3 text-left transition-colors flex items-center gap-3 ${sel ? "bg-primary/10" : "hover:bg-white/5"}`}
+                              >
                                 <ScoreRing score={f.trajectory_score ?? 0} size={36} />
                                 <div className="flex-1 min-w-0">
-                                  <p className="text-[11px] font-medium truncate">{f.origin} → {f.destination}</p>
-                                  <div className="flex items-center gap-1.5 mt-0.5">
-                                    <div className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
-                                    <span className={`text-[10px] font-mono ${cfg.color}`}>{cfg.label}</span>
+                                  <p className="text-[13px] font-medium truncate">{placeName(f.origin)} → {placeName(f.destination)}</p>
+                                  <div className="flex items-center gap-2 mt-0.5">
+                                    <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
+                                    <span className={`text-[11px] font-mono ${cfg.color}`}>{cfg.label}</span>
+                                    {!mappedIds.has(f.id) && <span className="text-[10px] font-mono text-muted-foreground">no coords</span>}
                                   </div>
                                 </div>
-                                {sel && <ChevronRight className="w-3 h-3 text-primary shrink-0" />}
-                              </div>
-                            </button>
+                                {sel && <ChevronRight className="w-4 h-4 text-primary shrink-0" />}
+                              </button>
+                            </li>
                           );
                         })}
-                      </div>
+                      </ul>
                     )}
                   </div>
-                  <div className="shrink-0 p-3 border-t border-border/30">
+                  <div className="shrink-0 p-3 border-t border-border">
                     <button onClick={() => navigate("/plan")}
-                      className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground rounded-lg py-2 text-xs font-semibold hover:bg-primary/90 transition-colors"
+                      className="w-full flex items-center justify-center gap-2 bg-primary text-primary-foreground rounded-lg h-10 text-xs font-semibold hover:brightness-110 transition"
                     >
-                      <Plus className="w-3.5 h-3.5" /> New Flight Plan
+                      <Plus className="w-4 h-4" /> New flight plan
                     </button>
                   </div>
                 </div>
               </div>
 
-              {/* Floating detail panel — right */}
+              {/* Detail panel */}
               <AnimatePresence>
                 {selectedFlight && (
-                  <motion.div
+                  <motion.aside
                     key={selectedFlight.id}
-                    initial={{ opacity: 0, x: 16 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 16 }}
-                    transition={{ duration: 0.22 }}
-                    className="absolute right-3 top-3 w-72 glass-panel rounded-2xl p-4 space-y-4"
+                    initial={{ opacity: 0, x: 16 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 16 }}
+                    transition={{ duration: 0.2 }}
+                    className="md:absolute md:right-3 md:top-16 md:w-80 glass-panel md:rounded-2xl p-4 space-y-4 border-t md:border-t border-border"
+                    aria-label="Flight details"
                   >
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest mb-1">Flight Details</p>
-                        <p className="text-sm font-semibold">{selectedFlight.origin}</p>
-                        <div className="flex items-center gap-1 mt-0.5">
-                          <ArrowRight className="w-3 h-3 text-primary" />
-                          <p className="text-sm text-foreground/70">{selectedFlight.destination}</p>
-                        </div>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="label-caps mb-1">Flight details</p>
+                        <p className="text-sm font-semibold truncate">{placeName(selectedFlight.origin)}</p>
+                        <p className="text-sm text-foreground/70 truncate flex items-center gap-1">
+                          <ArrowRight className="w-3 h-3 text-primary shrink-0" />{placeName(selectedFlight.destination)}
+                        </p>
                       </div>
                       <ScoreRing score={selectedFlight.trajectory_score ?? 0} size={48} />
                     </div>
-
-                    <div className="grid grid-cols-2 gap-2">
+                    <dl className="grid grid-cols-2 gap-2">
                       {[
-                        { label: "Aircraft",  value: selectedFlight.aircraft_id || "—" },
-                        { label: "Status",    value: (STATUS_CONFIG[selectedFlight.status] ?? STATUS_CONFIG.pending).label },
-                        { label: "Weather",   value: selectedFlight.weather_risk || "—" },
+                        { label: "Aircraft", value: selectedFlight.aircraft_id || "—" },
+                        { label: "Status", value: statusOf(selectedFlight.status).label },
+                        { label: "Weather", value: selectedFlight.weather_risk || "—" },
                         { label: "Conflicts", value: String(selectedFlight.conflicts) },
                       ].map(({ label, value }) => (
-                        <div key={label} className="bg-secondary/30 rounded-lg px-3 py-2">
-                          <p className="text-[10px] font-mono text-muted-foreground">{label}</p>
-                          <p className="text-xs font-medium mt-0.5 truncate">{value}</p>
+                        <div key={label} className="well rounded-lg px-3 py-2">
+                          <dt className="label-caps">{label}</dt>
+                          <dd className="text-xs font-medium mt-1 truncate capitalize">{value}</dd>
                         </div>
                       ))}
+                    </dl>
+                    {!mappedIds.has(selectedFlight.id) && (
+                      <p className="text-[11px] text-caution flex items-center gap-1.5">
+                        <MapPin className="w-3 h-3" /> No coordinates on file — not shown on the map.
+                      </p>
+                    )}
+                    <div className="flex items-center justify-between">
+                      <p className="text-[11px] font-mono text-muted-foreground">
+                        Filed {new Date(selectedFlight.created_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                      </p>
+                      <button onClick={() => setSelectedId(null)} className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors">
+                        <X className="w-3.5 h-3.5" /> Close
+                      </button>
                     </div>
-
-                    <p className="text-[10px] font-mono text-muted-foreground">
-                      Submitted {new Date(selectedFlight.created_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                    </p>
-
-                    <button
-                      onClick={() => setSelectedFlight(null)}
-                      className="w-full text-[11px] font-mono text-muted-foreground hover:text-foreground transition-colors"
-                    >
-                      Dismiss
-                    </button>
-                  </motion.div>
+                  </motion.aside>
                 )}
               </AnimatePresence>
-
-              {/* Live badge */}
-              <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-black/60 backdrop-blur-sm rounded-lg px-2.5 py-1.5 border border-white/10"
-                style={{ right: selectedFlight ? "296px" : "12px" }}>
-                <Activity className="w-3 h-3 text-primary" />
-                <span className="text-[10px] font-mono text-white/60 tracking-widest">LIVE</span>
-              </div>
             </motion.div>
           )}
 
@@ -611,56 +631,52 @@ export default function Dashboard() {
           {tab === "history" && (
             <motion.div
               key="history"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className="overflow-y-auto"
-              style={{ height: "calc(100vh - 56px)" }}
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="absolute inset-0 overflow-y-auto"
             >
-              <div className="max-w-4xl mx-auto px-4 py-6">
-                <div className="flex items-center justify-between mb-4">
+              <div className="max-w-5xl mx-auto px-4 py-6">
+                <div className="flex items-end justify-between mb-4">
                   <div>
-                    <h2 className="text-sm font-semibold">Flight History</h2>
-                    <p className="text-[11px] text-muted-foreground mt-0.5">{historical.length} archived flights</p>
+                    <h2 className="text-xl font-semibold">Flight history</h2>
+                    <p className="text-xs text-muted-foreground mt-1">{historical.length} archived flight{historical.length === 1 ? "" : "s"}</p>
                   </div>
                 </div>
 
-                {historical.length === 0 ? (
-                  <div className="glass-card rounded-2xl p-12 text-center">
-                    <Plane className="w-8 h-8 text-muted-foreground/20 mx-auto mb-3" />
+                {loadingFlights ? <Spinner /> : historical.length === 0 ? (
+                  <div className="panel rounded-2xl p-12 text-center">
+                    <Plane className="w-8 h-8 text-muted-foreground/40 mx-auto mb-3" />
                     <p className="text-sm font-medium">No completed flights yet</p>
-                    <p className="text-xs text-muted-foreground mt-1">Landed flights will appear here for analytics.</p>
+                    <p className="text-xs text-muted-foreground mt-1">Landed flights appear here for analytics.</p>
                   </div>
                 ) : (
-                  <div className="glass-card rounded-2xl overflow-hidden">
-                    {/* Header */}
-                    <div className="grid grid-cols-[40px_1fr_80px_80px_100px] gap-4 px-5 py-2.5 border-b border-border/30 bg-secondary/10">
+                  <div className="panel rounded-2xl overflow-hidden" role="table" aria-label="Archived flights">
+                    <div role="row" className="grid grid-cols-[40px_1fr_auto] md:grid-cols-[40px_1fr_70px_90px_130px] gap-4 px-5 py-2.5 border-b border-border bg-white/[0.02]">
                       {["", "Route", "Score", "Weather", "Landed"].map((h, i) => (
-                        <span key={i} className="text-[10px] font-mono text-muted-foreground/55 uppercase tracking-wider">{h}</span>
+                        <span key={i} role="columnheader" className={`label-caps ${i === 2 || i === 3 ? "hidden md:block" : ""}`}>{h}</span>
                       ))}
                     </div>
-                    <div className="divide-y divide-border/20">
+                    <div className="divide-y divide-border">
                       {historical.map((h, i) => (
                         <motion.div
+                          role="row"
                           key={h.id}
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          transition={{ delay: i * 0.03 }}
-                          className="grid grid-cols-[40px_1fr_80px_80px_100px] gap-4 items-center px-5 py-3.5 hover:bg-secondary/10 transition-colors"
+                          initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                          transition={{ delay: Math.min(i, 15) * 0.025 }}
+                          className="grid grid-cols-[40px_1fr_auto] md:grid-cols-[40px_1fr_70px_90px_130px] gap-4 items-center px-5 py-3.5 hover:bg-white/[0.03] transition-colors"
                         >
                           <ScoreRing score={h.trajectory_score ?? 0} size={36} />
                           <div className="min-w-0">
-                            <div className="flex items-center gap-1 text-xs">
-                              <span className="font-medium truncate text-foreground/85">{h.origin}</span>
+                            <div className="flex items-center gap-1.5 text-[13px]">
+                              <span className="font-medium truncate">{placeName(h.origin)}</span>
                               <ArrowRight className="w-3 h-3 text-muted-foreground shrink-0" />
-                              <span className="truncate text-foreground/60">{h.destination}</span>
+                              <span className="truncate text-foreground/65">{placeName(h.destination)}</span>
                             </div>
-                            <p className="text-[10px] font-mono text-muted-foreground mt-0.5">{h.aircraft_id || "—"}</p>
+                            <p className="text-[11px] font-mono text-muted-foreground mt-0.5">{h.aircraft_id || "—"}</p>
                           </div>
-                          <span className="text-xs font-mono text-muted-foreground">{h.trajectory_score ?? "—"}</span>
-                          <span className="text-[11px] font-mono text-muted-foreground capitalize">{h.weather_risk ?? "n/a"}</span>
-                          <span className="text-[11px] font-mono text-muted-foreground">
+                          <span className="hidden md:block text-xs font-mono tabular text-foreground/75">{h.trajectory_score ?? "—"}</span>
+                          <span className="hidden md:block text-xs font-mono text-muted-foreground capitalize">{h.weather_risk ?? "n/a"}</span>
+                          <span className="text-[11px] font-mono text-muted-foreground tabular text-right md:text-left">
                             {new Date(h.landed_at ?? h.archived_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                           </span>
                         </motion.div>
@@ -671,9 +687,21 @@ export default function Dashboard() {
               </div>
             </motion.div>
           )}
-
         </AnimatePresence>
       </div>
+    </div>
+  );
+}
+
+function EmptyFlights({ onPlan }: { onPlan: () => void }) {
+  return (
+    <div className="panel rounded-xl p-6 text-center">
+      <Plane className="w-6 h-6 text-muted-foreground/50 mx-auto mb-2" />
+      <p className="text-sm font-medium">No open flight plans</p>
+      <p className="text-xs text-muted-foreground mt-1">File a flight to see it here and on the map.</p>
+      <button onClick={onPlan} className="mt-3 text-xs text-primary hover:underline font-medium">
+        Plan your first flight →
+      </button>
     </div>
   );
 }

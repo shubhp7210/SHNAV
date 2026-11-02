@@ -19,6 +19,9 @@
     "paths": {
       "@/*": [
         "./src/*"
+      ],
+      "https://esm.sh/@supabase/supabase-js@2": [
+        "./node_modules/@supabase/supabase-js"
       ]
     },
     "skipLibCheck": true,

@@ -12,7 +12,14 @@
 // thresholds (e.g. "moderate wind" was >20 / >25 / >30 km/h in three different
 // functions) into one place.
 
+import { forecastUrl, parseMinutely, pointAt } from "./forecast.ts";
+import { countCall } from "./log.ts";
+
 export interface WeatherSample {
+  /** false = the upstream call failed; the numbers are NOT observations. */
+  available: boolean;
+  /** Forecast slot (UTC ISO) the values are valid for. */
+  validAt: string | null;
   windSpeedKmh: number;
   windFromDeg: number;
   windGustsKmh: number;
@@ -22,73 +29,50 @@ export interface WeatherSample {
   visibilityM: number;
 }
 
-/** Neutral weather used when the upstream call fails. */
-export const NEUTRAL_WX: WeatherSample = {
-  windSpeedKmh: 5,
-  windFromDeg: 0,
-  windGustsKmh: 7,
-  precipitationMm: 0,
-  temperatureC: 18,
-  weatherCode: 0,
-  visibilityM: 10000,
+/** Placeholder returned when weather is unavailable. `available: false` must be
+ *  honoured by every caller — these values are never presented as data. */
+export const UNAVAILABLE_WX: WeatherSample = {
+  available: false, validAt: null,
+  windSpeedKmh: 0, windFromDeg: 0, windGustsKmh: 0, precipitationMm: 0,
+  temperatureC: NaN, weatherCode: 0, visibilityM: NaN,
 };
 
-/** One-shot Open-Meteo `current` weather fetch. */
-export async function fetchWeather(lat: number, lon: number): Promise<WeatherSample> {
+/** Forecast points (15-min grid) covering [at, at+45 min]; [] on failure. */
+export async function fetchForecastPoints(lat: number, lon: number, at: Date) {
   try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,visibility,weather_code&wind_speed_unit=kmh&forecast_days=1`;
-    const res = await fetch(url);
-    if (!res.ok) return { ...NEUTRAL_WX };
-    const json = await res.json();
-    const c = json?.current ?? {};
-    return {
-      windSpeedKmh:    Number.isFinite(c.wind_speed_10m)     ? c.wind_speed_10m     : NEUTRAL_WX.windSpeedKmh,
-      windFromDeg:     Number.isFinite(c.wind_direction_10m) ? c.wind_direction_10m : NEUTRAL_WX.windFromDeg,
-      windGustsKmh:    Number.isFinite(c.wind_gusts_10m)     ? c.wind_gusts_10m     : NEUTRAL_WX.windGustsKmh,
-      precipitationMm: Number.isFinite(c.precipitation)      ? c.precipitation      : NEUTRAL_WX.precipitationMm,
-      temperatureC:    Number.isFinite(c.temperature_2m)     ? c.temperature_2m     : NEUTRAL_WX.temperatureC,
-      weatherCode:     Number.isFinite(c.weather_code)       ? c.weather_code       : NEUTRAL_WX.weatherCode,
-      visibilityM:     Number.isFinite(c.visibility)         ? c.visibility         : NEUTRAL_WX.visibilityM,
-    };
+    countCall("open-meteo");
+    const res = await fetch(forecastUrl(lat, lon, at), { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return [];
+    return parseMinutely(await res.json());
   } catch {
-    return { ...NEUTRAL_WX };
+    return [];
   }
 }
 
-interface WxCacheEntry {
-  wx: WeatherSample;
-  ts: number;
+/** Weather at `at` (default: now) from Open-Meteo's 15-minute forecast. */
+export async function fetchWeather(lat: number, lon: number, at: Date = new Date()): Promise<WeatherSample> {
+  const p = pointAt(await fetchForecastPoints(lat, lon, at), at);
+  if (!p) return { ...UNAVAILABLE_WX };
+  return {
+    available: true, validAt: p.time,
+    windSpeedKmh: p.windSpeedKmh, windFromDeg: p.windFromDeg, windGustsKmh: p.windGustsKmh,
+    precipitationMm: p.precipitationMm, temperatureC: p.temperatureC, weatherCode: p.weatherCode,
+    visibilityM: p.visibilityM,
+  };
 }
 
-/** Per-instance Open-Meteo cache. Buckets queries into ~5 km grid cells so
- *  multiple route candidates sampling nearby points share fetches. Also
- *  deduplicates in-flight requests via the promise map. */
+/** Per-request cache bucketing samples into ~5 km cells, all evaluated at the
+ *  same instant (the flight's departure time). Deduplicates in-flight requests. */
 export class WxCache {
   private inflight = new Map<string, Promise<WeatherSample>>();
-  private resolved = new Map<string, WxCacheEntry>();
-  private readonly ttlMs: number;
-
-  constructor(ttlMs = 5 * 60 * 1000) {
-    this.ttlMs = ttlMs;
-  }
-
+  constructor(private readonly at: Date = new Date()) {}
   private key(lat: number, lon: number): string {
-    // 0.05° ≈ 5.5 km at mid latitudes.
     return `${Math.round(lat * 20) / 20},${Math.round(lon * 20) / 20}`;
   }
-
-  async get(lat: number, lon: number): Promise<WeatherSample> {
+  get(lat: number, lon: number): Promise<WeatherSample> {
     const k = this.key(lat, lon);
-    const cached = this.resolved.get(k);
-    if (cached && Date.now() - cached.ts < this.ttlMs) return cached.wx;
-    const existing = this.inflight.get(k);
-    if (existing) return existing;
-    const p = fetchWeather(lat, lon).then((wx) => {
-      this.resolved.set(k, { wx, ts: Date.now() });
-      this.inflight.delete(k);
-      return wx;
-    });
-    this.inflight.set(k, p);
+    let p = this.inflight.get(k);
+    if (!p) { p = fetchWeather(lat, lon, this.at); this.inflight.set(k, p); }
     return p;
   }
 }
@@ -151,8 +135,10 @@ export function weatherSeverity(wx: WeatherSample): number {
   else if (wx.weatherCode >= 71) s += 0.3; // snow
   else if (wx.weatherCode >= 61) s += 0.15; // rain
   else if (wx.weatherCode >= 51) s += 0.06; // drizzle
-  if (wx.visibilityM < 3000) s += 0.3;
-  else if (wx.visibilityM < 6000) s += 0.1;
+  if (Number.isFinite(wx.visibilityM)) {
+    if (wx.visibilityM < 3000) s += 0.3;
+    else if (wx.visibilityM < 6000) s += 0.1;
+  }
   return Math.min(1, s);
 }
 
@@ -165,7 +151,7 @@ export function turbulenceFromGustCross(gustsKmh: number, crosswindKmh: number):
 
 /** 0..1 icing probability proxy from temperature + precipitation + weather code. */
 export function icingFromWeather(wx: WeatherSample): number {
-  if (wx.temperatureC > 4) return 0;
+  if (!Number.isFinite(wx.temperatureC) || wx.temperatureC > 4) return 0;
   let p = 0;
   if (wx.temperatureC <= -2 && wx.precipitationMm > 0) p += 0.6;
   else if (wx.temperatureC <= 2 && wx.precipitationMm > 0) p += 0.35;
@@ -188,4 +174,25 @@ export function weatherCodeToDescription(code: number): string {
   if (code <= 84) return "Rain showers";
   if (code <= 94) return "Snow showers";
   return "Thunderstorm";
+}
+
+/** Departure-time risk at a point: departure, +15, +30 min (0..100, scaled by
+ *  altitude band). `available: false` when the forecast can't be fetched. */
+export async function departureRisk(lat: number, lon: number, at: Date, band: string): Promise<
+  { available: false } |
+  { available: true; riskScore: number; forecast15: number; forecast30: number; trend: "improving" | "degrading" | "stable"; validAt: string }
+> {
+  const pts = await fetchForecastPoints(lat, lon, at);
+  const p0 = pointAt(pts, at);
+  if (!p0) return { available: false };
+  const mult = band === "high" ? 1.3 : band === "mid" ? 1.15 : 1.0;
+  const r = (p: { windSpeedKmh: number; windGustsKmh: number; precipitationMm: number; weatherCode: number }) =>
+    Math.min(100, Math.round(computeRisk(p.windSpeedKmh, p.windGustsKmh, p.precipitationMm, p.weatherCode) * mult));
+  const p15 = pointAt(pts, new Date(at.getTime() + 15 * 60_000)) ?? p0;
+  const p30 = pointAt(pts, new Date(at.getTime() + 30 * 60_000)) ?? p15;
+  const r0 = r(p0), r30 = r(p30);
+  return {
+    available: true, riskScore: r0, forecast15: r(p15), forecast30: r30, validAt: p0.time,
+    trend: r30 < r0 ? "improving" : r30 > r0 ? "degrading" : "stable",
+  };
 }

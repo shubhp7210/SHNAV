@@ -37,3 +37,7 @@ verify_jwt = true
 
 [functions.weather-intelligence]
 verify_jwt = true
+# Frontend error intake. The anon key is itself a JWT, so gateway verification
+# still passes for signed-out visitors; the function rate-limits per user/IP.
+[functions.log-client-error]
+verify_jwt = true

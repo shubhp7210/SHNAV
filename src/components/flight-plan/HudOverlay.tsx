@@ -40,11 +40,12 @@ export default function HudOverlay({
 
   return (
     <>
-      {/* Top-center compass — three-figure magnetic heading */}
-      <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
+      {/* Top-left instrument stack: compass + wind. (Left-anchored so it never
+          collides with the POV switcher on narrow screens.) */}
+      <div className="absolute top-3 left-3 z-10 pointer-events-none flex flex-col items-start gap-1.5">
         <div className="flex items-center gap-2 px-3 py-1.5 rounded-full
-                        bg-black/55 border border-primary/40 backdrop-blur-md
-                        shadow-[0_0_18px_-4px_rgba(45,212,191,0.55)]">
+                        glass-panel border-primary/40
+                        shadow-[0_0_18px_-4px_hsl(var(--primary)/0.55)]">
           <Compass
             className="w-3.5 h-3.5 text-primary transition-transform duration-500"
             style={{ transform: `rotate(${-heading}deg)` }}
@@ -53,17 +54,24 @@ export default function HudOverlay({
             {fmtHeading(heading)}°
           </span>
           <span className="text-[10px] font-mono text-white/50 uppercase">{cardinal(heading)}</span>
-          <span className="w-px h-3 bg-white/15" />
-          <span className="text-[10px] font-mono text-white/50 tabular-nums">
+          <span className="hidden sm:block w-px h-3 bg-white/15" />
+          <span className="hidden sm:inline text-[10px] font-mono text-white/50 tabular-nums">
             {Math.round(speedKmh)} km/h
           </span>
         </div>
+        {windSpeed !== null && (
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full glass-panel">
+            <Wind className="w-3 h-3 text-signal" />
+            <span className="font-mono text-[11px] text-white/80 tabular-nums">
+              Wind {Math.round(kmhToKnots(windSpeed))} kt
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Top-right POV switcher */}
       <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5
-                      bg-black/55 border border-white/10 backdrop-blur-md
-                      rounded-full p-1">
+                      glass-panel rounded-full p-1">
         {(["fpv", "tac", "hyb"] as PovMode[]).map((m) => (
           <button
             key={m}
@@ -71,7 +79,7 @@ export default function HudOverlay({
             className={`px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold tracking-wider
               transition-all duration-150 ${
                 povMode === m
-                  ? "bg-primary text-primary-foreground shadow-[0_0_10px_-2px_rgba(45,212,191,0.7)]"
+                  ? "bg-primary text-primary-foreground shadow-[0_0_10px_-2px_hsl(var(--primary)/0.7)]"
                   : "text-white/55 hover:text-white"
               }`}
             title={`${POV_LABEL[m]} view`}
@@ -92,22 +100,9 @@ export default function HudOverlay({
         </button>
       </div>
 
-      {/* Bottom-right wind indicator */}
-      {windSpeed !== null && (
-        <div className="absolute bottom-4 right-4 z-10 pointer-events-none">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full
-                          bg-black/55 border border-white/10 backdrop-blur-md">
-            <Wind className="w-3 h-3 text-cyan-300" />
-            <span className="font-mono text-[11px] text-white/80 tabular-nums">
-              {Math.round(kmhToKnots(windSpeed))} kt
-            </span>
-          </div>
-        </div>
-      )}
-
       {/* Clock-code drift alert (only when off-route) */}
       {driftClock !== null && (
-        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-10 pointer-events-none animate-fade-in">
+        <div className="absolute top-24 sm:top-14 left-1/2 -translate-x-1/2 z-10 pointer-events-none animate-fade-in">
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border backdrop-blur-md
                            ${sevColor}`}>
             <Crosshair className="w-3.5 h-3.5" />

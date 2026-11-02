@@ -94,14 +94,19 @@ export default function WeatherIntelligenceCard({ weather }: Props) {
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, delay: 0.1 }}
-      className="rounded-xl border border-white/10 bg-white/5 overflow-hidden"
+      className="panel rounded-2xl overflow-hidden"
     >
-      <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
-        <span className="text-xs font-semibold text-white/60 uppercase tracking-widest">Weather &amp; Flight Awareness</span>
+      <div className="flex items-center justify-between px-5 py-3 border-b border-border">
+        <span className="label-caps text-foreground/75">Weather &amp; Flight Awareness</span>
         <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${riskCfg.text} ${riskCfg.bg} ${riskCfg.border}`}>
           {ow.risk_level.toUpperCase()}
         </span>
       </div>
+      {weather.valid_at && (
+        <p className="px-5 pt-3 text-[11px] font-mono text-muted-foreground">
+          Forecast for departure · {new Date(weather.valid_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} · Open-Meteo 15-min
+        </p>
+      )}
 
       <div className="p-5 space-y-4">
         {/* Aviation-style wind callout */}
@@ -116,7 +121,7 @@ export default function WeatherIntelligenceCard({ weather }: Props) {
         </div>
 
         {/* Operational metrics grid — facts, not advice */}
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           {[
             {
               icon: Wind,
@@ -133,19 +138,19 @@ export default function WeatherIntelligenceCard({ weather }: Props) {
             {
               icon: Thermometer,
               label: "Temp",
-              value: `${Math.round(ow.temperature ?? 0)}°C`,
-              sub: ow.temperature != null && ow.temperature <= 2 ? "Icing risk" : "Within limits",
+              value: ow.temperature != null ? `${Math.round(ow.temperature)}°C` : "—",
+              sub: ow.temperature == null ? "n/a" : ow.temperature <= 2 ? "Icing risk" : "Within limits",
             },
             {
               icon: Eye,
               label: "Visibility",
-              value: (ow.visibility_m ?? 0) >= 10000
+              value: ow.visibility_m == null ? "—" : ow.visibility_m >= 10000
                 ? "10+ km"
-                : `${((ow.visibility_m ?? 0) / 1000).toFixed(1)} km`,
-              sub: (ow.visibility_m ?? 0) < 3000 ? "Below VFR" : (ow.visibility_m ?? 0) < 5000 ? "Marginal" : "VFR",
+                : `${(ow.visibility_m / 1000).toFixed(1)} km`,
+              sub: ow.visibility_m == null ? "n/a" : ow.visibility_m < 3000 ? "Below VFR" : ow.visibility_m < 5000 ? "Marginal" : "VFR",
             },
           ].map(({ icon: Ic, label, value, sub }) => (
-            <div key={label} className="bg-black/20 rounded-lg p-2.5 text-center">
+            <div key={label} className="well rounded-lg p-2.5 text-center">
               <Ic className="w-4 h-4 text-cyan-400 mx-auto mb-1" />
               <p className="text-[10px] text-white/40">{label}</p>
               <p className="text-xs font-bold text-white">{value}</p>
@@ -157,7 +162,7 @@ export default function WeatherIntelligenceCard({ weather }: Props) {
         {/* Hazard probabilities — ESTIMATED from wind/temperature/precip, not a
             direct turbulence/icing observation. Labeled honestly per project rules. */}
         <div className="grid grid-cols-2 gap-2">
-          <div className="bg-black/20 rounded-md px-3 py-2">
+          <div className="well rounded-md px-3 py-2">
             <div className="flex items-center justify-between">
               <span className="text-[10px] text-white/40 uppercase tracking-widest">Turbulence</span>
               <span className={`text-xs font-mono font-bold ${hazards.turbulencePct >= 60 ? "text-red-400" : hazards.turbulencePct >= 30 ? "text-amber-400" : "text-emerald-400"}`}>
@@ -166,7 +171,7 @@ export default function WeatherIntelligenceCard({ weather }: Props) {
             </div>
             <span className="text-[9px] font-mono text-white/30">estimated from gusts</span>
           </div>
-          <div className="bg-black/20 rounded-md px-3 py-2">
+          <div className="well rounded-md px-3 py-2">
             <div className="flex items-center justify-between">
               <span className="text-[10px] text-white/40 uppercase tracking-widest">Icing</span>
               <span className={`text-xs font-mono font-bold ${hazards.icingPct >= 50 ? "text-red-400" : hazards.icingPct >= 20 ? "text-amber-400" : "text-emerald-400"}`}>

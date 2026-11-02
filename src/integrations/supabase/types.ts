@@ -108,6 +108,9 @@ export type Database = {
       }
       flight_decisions: {
         Row: {
+          inputs: Json | null
+          route_candidate_id: string | null
+          superseded: boolean
           aircraft_id: string
           airspace_load: number | null
           confidence: number
@@ -123,6 +126,9 @@ export type Database = {
           weather_risk: string | null
         }
         Insert: {
+          inputs?: Json | null
+          route_candidate_id?: string | null
+          superseded?: boolean
           aircraft_id: string
           airspace_load?: number | null
           confidence?: number
@@ -138,6 +144,9 @@ export type Database = {
           weather_risk?: string | null
         }
         Update: {
+          inputs?: Json | null
+          route_candidate_id?: string | null
+          superseded?: boolean
           aircraft_id?: string
           airspace_load?: number | null
           confidence?: number
@@ -171,6 +180,18 @@ export type Database = {
       }
       flight_intents: {
         Row: {
+          airspace_assessment: Json | null
+          analysis_result: Json | null
+          coords_status: string | null
+          departure_end_at: string | null
+          departure_start_at: string | null
+          dest_lat: number | null
+          dest_lon: number | null
+          expired_at: string | null
+          idempotency_key: string | null
+          origin_lat: number | null
+          origin_lon: number | null
+          vertiport_assessment: Json | null
           aircraft_id: string
           aircraft_type: string
           altitude_band: string
@@ -197,6 +218,18 @@ export type Database = {
           weather_risk: string | null
         }
         Insert: {
+          airspace_assessment?: Json | null
+          analysis_result?: Json | null
+          coords_status?: string | null
+          departure_end_at?: string | null
+          departure_start_at?: string | null
+          dest_lat?: number | null
+          dest_lon?: number | null
+          expired_at?: string | null
+          idempotency_key?: string | null
+          origin_lat?: number | null
+          origin_lon?: number | null
+          vertiport_assessment?: Json | null
           aircraft_id: string
           aircraft_type?: string
           altitude_band?: string
@@ -223,6 +256,18 @@ export type Database = {
           weather_risk?: string | null
         }
         Update: {
+          airspace_assessment?: Json | null
+          analysis_result?: Json | null
+          coords_status?: string | null
+          departure_end_at?: string | null
+          departure_start_at?: string | null
+          dest_lat?: number | null
+          dest_lon?: number | null
+          expired_at?: string | null
+          idempotency_key?: string | null
+          origin_lat?: number | null
+          origin_lon?: number | null
+          vertiport_assessment?: Json | null
           aircraft_id?: string
           aircraft_type?: string
           altitude_band?: string
@@ -625,6 +670,8 @@ export type Database = {
       }
       vertiports: {
         Row: {
+          capacity_source: string
+          faa_id: string | null
           city: string | null
           created_at: string | null
           id: string
@@ -638,6 +685,8 @@ export type Database = {
           updated_at: string | null
         }
         Insert: {
+          capacity_source?: string
+          faa_id?: string | null
           city?: string | null
           created_at?: string | null
           id?: string
@@ -651,6 +700,8 @@ export type Database = {
           updated_at?: string | null
         }
         Update: {
+          capacity_source?: string
+          faa_id?: string | null
           city?: string | null
           created_at?: string | null
           id?: string

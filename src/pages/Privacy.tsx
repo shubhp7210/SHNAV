@@ -28,7 +28,7 @@ const Section = ({ title, children }: { title: string; children: React.ReactNode
 export default function Privacy() {
   return (
     <div className="min-h-screen bg-background">
-      <div className="container max-w-3xl py-10">
+      <div className="container max-w-3xl px-5 pt-24 pb-28 md:pb-16">
         <div className="flex items-center justify-between mb-10">
           <Logo size={26} showWordmark />
           <Link
@@ -39,7 +39,7 @@ export default function Privacy() {
           </Link>
         </div>
 
-        <h1 className="text-2xl font-semibold tracking-tight">Privacy Policy</h1>
+        <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight">Privacy Policy</h1>
         <p className="text-xs font-mono text-foreground/40 mt-2 mb-10">
           Last updated: {LAST_UPDATED}
         </p>

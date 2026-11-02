@@ -47,7 +47,7 @@ export default function Cockpit({
   // and the dark canvas fallback (a white panel would vanish on the dark map).
   return (
     <div className="absolute inset-x-0 bottom-0 z-10 p-3">
-      <div className="rounded-xl border border-white/15 bg-slate-950/70 backdrop-blur-md px-3 py-2.5 flex flex-wrap items-center gap-x-5 gap-y-2.5 shadow-lg">
+      <div className="glass-panel rounded-xl px-3 py-2.5 flex flex-wrap items-center gap-x-5 gap-y-2.5">
         {/* Camera modes */}
         <div className="flex items-center gap-1">
           {MODE_BTN.map(({ mode, label, Icon }) => (
@@ -68,6 +68,7 @@ export default function Cockpit({
           <button
             onClick={() => onMode("follow")}
             className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[10px] font-mono font-semibold border bg-black/20 border-white/10 text-white/55 hover:border-white/25"
+            aria-label="Recenter on vehicle"
             title="Recenter on vehicle"
           >
             <RotateCcw className="w-3 h-3" />
@@ -90,7 +91,7 @@ export default function Cockpit({
 
         {/* Connection / freshness — never fabricated */}
         <div className="flex items-center gap-2 ml-auto">
-          <span className={`inline-block w-1.5 h-1.5 rounded-full ${stale ? "bg-amber-400" : status === "alert" ? "bg-red-400 animate-pulse" : "bg-emerald-400 animate-pulse"}`} />
+          <span className={`inline-block w-1.5 h-1.5 rounded-full ${stale ? "bg-caution" : status === "alert" ? "bg-destructive animate-pulse" : "bg-success animate-pulse"}`} />
           <span className="text-[10px] font-mono text-white/60">
             {stale ? `STALE · ${Math.round(ageMs / 1000)}s ago` : "LIVE"}
           </span>
@@ -98,6 +99,7 @@ export default function Cockpit({
             onClick={onToggleMute}
             className="w-7 h-7 flex items-center justify-center rounded-lg bg-black/20 border border-white/10 text-white/55 hover:border-white/25"
             title={muted ? "Unmute" : "Mute"}
+            aria-label={muted ? "Unmute audio" : "Mute audio"}
           >
             {muted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
           </button>

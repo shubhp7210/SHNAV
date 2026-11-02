@@ -1,21 +1,25 @@
 import {
   CesiumWidget, Cartesian3, HeadingPitchRange, Matrix4, Math as CMath,
 } from "cesium";
-import type { Pt } from "@/components/Map3D";
+import type { Pt, TargetView } from "@/lib/geo/region";
 
 export type CameraMode = "follow" | "forward" | "overview" | "free";
 export const CAMERA_MODES: CameraMode[] = ["follow", "forward", "overview", "free"];
 
-interface Vehicle { lat: number; lng: number; heading: number; speedKmh: number; ts: number }
+interface Vehicle { lat: number; lng: number; heading: number; speedKmh: number; ts: number; alt?: number }
 
 /** Interpolated camera rig state (ground-anchored target + spherical offset). */
-interface Rig { lat: number; lng: number; heading: number; pitch: number; range: number }
+interface Rig { lat: number; lng: number; alt: number; heading: number; pitch: number; range: number }
 
 // Easing rate toward the goal, per second (≈0.09/frame at 60 fps). Time-based,
 // so the camera trails the vehicle by the same distance at any frame rate — a
 // per-frame factor let slow GPUs fall hundreds of metres behind (vehicle
 // off-screen).
 const SMOOTH_PER_SEC = 5.5;
+// Gentler rate for the opening glide from the starting view (Manhattan) to the
+// vehicle, so the hand-off reads as a deliberate camera move, not a snap.
+const INTRO_PER_SEC = 1.6;
+const INTRO_MS = 2600;
 const M_PER_DEG = 111_320;
 
 /** Shortest signed angular delta a→b, in radians (handles 180° wraparound). */
@@ -41,9 +45,21 @@ export class CameraController {
   private raf = 0;
   private lastFrame = 0;
   private disposed = false;
+  private introUntil = 0;
+  // Smoothed target velocity (deg/s) — fed forward so the rig doesn't trail a
+  // fast vehicle by speed/rate metres. Low-passed so 1 Hz GPS steps stay smooth.
+  private vel = { lat: 0, lng: 0 };
+  private lastGoal: { lat: number; lng: number; mode: CameraMode } | null = null;
 
-  constructor(widget: CesiumWidget) {
+  constructor(widget: CesiumWidget, start?: TargetView) {
     this.widget = widget;
+    if (start) {
+      this.rig = {
+        lat: start.lat, lng: start.lng, alt: 0,
+        heading: CMath.toRadians(start.heading), pitch: CMath.toRadians(start.pitch), range: start.range,
+      };
+      this.introUntil = performance.now() + INTRO_MS;
+    }
     this.loop = this.loop.bind(this);
     this.raf = requestAnimationFrame(this.loop);
   }
@@ -77,7 +93,7 @@ export class CameraController {
   private goal(): Rig | null {
     const v = this.vehicle;
     if (this.mode === "overview") {
-      if (this.route.length < 2) return v ? { lat: v.lat, lng: v.lng, heading: 0, pitch: -0.9, range: 1500 } : null;
+      if (this.route.length < 2) return v ? { lat: v.lat, lng: v.lng, alt: 0, heading: 0, pitch: -0.9, range: 1500 } : null;
       // Frame the whole route: centroid + range from its span.
       let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
       for (const p of this.route) {
@@ -88,7 +104,7 @@ export class CameraController {
         (maxLat - minLat) * M_PER_DEG,
         (maxLng - minLng) * M_PER_DEG * Math.cos(CMath.toRadians((minLat + maxLat) / 2)),
       );
-      return { lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2, heading: 0, pitch: -0.95, range: Math.max(800, spanM * 1.6) };
+      return { lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2, alt: 0, heading: 0, pitch: -0.95, range: Math.max(800, spanM * 1.6) };
     }
     if (!v) return null;
     const hdg = CMath.toRadians(v.heading);
@@ -97,10 +113,10 @@ export class CameraController {
       const lookAheadM = 300 + Math.min(1200, v.speedKmh * 12);
       const dLat = (lookAheadM * Math.cos(hdg)) / M_PER_DEG;
       const dLng = (lookAheadM * Math.sin(hdg)) / (M_PER_DEG * Math.cos(CMath.toRadians(v.lat)));
-      return { lat: v.lat + dLat, lng: v.lng + dLng, heading: hdg, pitch: -0.28, range: 900 };
+      return { lat: v.lat + dLat, lng: v.lng + dLng, alt: (v.alt ?? 0) * 0.5, heading: hdg, pitch: -0.32, range: 900 };
     }
     // follow
-    return { lat: v.lat, lng: v.lng, heading: hdg, pitch: -0.52, range: 550 };
+    return { lat: v.lat, lng: v.lng, alt: v.alt ?? 0, heading: hdg, pitch: -0.45, range: 600 };
   }
 
   private loop(now: number): void {
@@ -108,21 +124,42 @@ export class CameraController {
     // Clamp dt so a backgrounded tab doesn't snap on return.
     const dt = this.lastFrame ? Math.min(0.25, (now - this.lastFrame) / 1000) : 1 / 60;
     this.lastFrame = now;
-    const SMOOTH = 1 - Math.exp(-SMOOTH_PER_SEC * dt);
+    const rate = now < this.introUntil ? INTRO_PER_SEC : SMOOTH_PER_SEC;
+    const SMOOTH = 1 - Math.exp(-rate * dt);
     if (this.mode !== "free") {
       const goal = this.goal();
       if (goal) {
         if (!this.rig) this.rig = { ...goal };
         const r = this.rig;
+        const lg = this.lastGoal;
+        if (lg && lg.mode === this.mode && dt > 0) {
+          const k = 1 - Math.exp(-3 * dt);
+          this.vel.lat += ((goal.lat - lg.lat) / dt - this.vel.lat) * k;
+          this.vel.lng += ((goal.lng - lg.lng) / dt - this.vel.lng) * k;
+        } else {
+          this.vel = { lat: 0, lng: 0 }; // first frame or mode switch: no feed-forward
+        }
+        this.lastGoal = { lat: goal.lat, lng: goal.lng, mode: this.mode };
+        if (now >= this.introUntil) {
+          r.lat += this.vel.lat * dt;
+          r.lng += this.vel.lng * dt;
+        }
         r.lat += (goal.lat - r.lat) * SMOOTH;
         r.lng += (goal.lng - r.lng) * SMOOTH;
+        r.alt += (goal.alt - r.alt) * SMOOTH;
         r.pitch += (goal.pitch - r.pitch) * SMOOTH;
         r.range += (goal.range - r.range) * SMOOTH;
         r.heading = angleLerp(r.heading, goal.heading, SMOOTH);
         this.widget.camera.lookAt(
-          Cartesian3.fromDegrees(r.lng, r.lat, 0),
+          Cartesian3.fromDegrees(r.lng, r.lat, r.alt),
           new HeadingPitchRange(r.heading, r.pitch, r.range),
         );
+        // Explicit-render mode: only draw while the rig is still moving.
+        const moving =
+          Math.abs(goal.lat - r.lat) + Math.abs(goal.lng - r.lng) > 1e-7 ||
+          Math.abs(goal.range - r.range) > 0.05 || Math.abs(goal.pitch - r.pitch) > 1e-4 ||
+          Math.abs(goal.alt - r.alt) > 0.05 || Math.abs(angleLerp(r.heading, goal.heading, 1) - r.heading) > 1e-4;
+        if (moving) this.widget.scene.requestRender();
       }
     }
     this.raf = requestAnimationFrame(this.loop);

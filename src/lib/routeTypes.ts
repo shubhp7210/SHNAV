@@ -85,7 +85,9 @@ export interface RouteOptimizerResult {
     method: string;
     generated_at: string;
   };
-  weather_conditions: WeatherConditions;
+  /** null when the departure-time forecast was unavailable. */
+  weather_conditions: WeatherConditions | null;
+  weather_data?: { available_samples: number; total_samples: number; valid_for: string };
   weather_risk: "low" | "moderate" | "high" | "unknown";
   historical_suggestion: HistoricalSuggestion;
   analysis_summary: {

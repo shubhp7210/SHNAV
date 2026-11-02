@@ -20,7 +20,7 @@ const StepRegistration = ({ data, updateData }: Props) => {
             value={data.aircraftId}
             onChange={(e) => updateData({ aircraftId: e.target.value })}
             placeholder="e.g. N-VTOL-4827"
-            className="w-full px-4 py-2.5 rounded-md bg-secondary border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 font-mono text-sm"
+            className="w-full px-4 h-11 rounded-lg bg-background/60 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 font-mono text-sm"
           />
         </div>
 
@@ -31,7 +31,7 @@ const StepRegistration = ({ data, updateData }: Props) => {
             value={data.operatorName}
             onChange={(e) => updateData({ operatorName: e.target.value })}
             placeholder="e.g. SkyLink Operations"
-            className="w-full px-4 py-2.5 rounded-md bg-secondary border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm"
+            className="w-full px-4 h-11 rounded-lg bg-background/60 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm"
           />
         </div>
 
@@ -40,7 +40,7 @@ const StepRegistration = ({ data, updateData }: Props) => {
           <select
             value={data.aircraftType}
             onChange={(e) => updateData({ aircraftType: e.target.value })}
-            className="w-full px-4 py-2.5 rounded-md bg-secondary border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm"
+            className="w-full px-4 h-11 rounded-lg bg-background/60 border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm"
           >
             <option value="evtol">eVTOL</option>
             <option value="rotorcraft">Rotorcraft</option>

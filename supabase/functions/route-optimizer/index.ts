@@ -2,12 +2,14 @@
 // time / wind / weather / turbulence / fuel / traffic / safety, and returns
 // the top 3. Weights are pulled from route_score_config so the learning loop
 // can adjust them from actual outcomes.
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { getCorsHeaders, EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
+import { EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
 import { checkRateLimit, tooManyRequests } from "../_shared/ratelimit.ts";
-import { getCoords } from "../_shared/geocode.ts";
-import { checkNetwork, toMinutes as toMin, type FlightTrack, type Conflict } from "../_shared/conflicts.ts";
+import { serve, httpError } from "../_shared/http.ts";
+import { readBody, validateFields } from "../_shared/validate.ts";
+import { checkNetwork, type Conflict } from "../_shared/conflicts.ts";
+import { loadTraffic, trackFromRow } from "../_shared/traffic.ts";
+import { trafficLabel } from "../_shared/anonymize.ts";
 import {
   bearingDeg,
   haversineKm as haversine,
@@ -141,6 +143,9 @@ interface RouteEval {
   minVisibilityM: number;
   worstWeatherCode: number;
   trafficPenalty: number;
+  /** Weather samples that actually returned forecast data. */
+  wxAvailable: number;
+  wxTotal: number;
 }
 
 async function evaluateRoute(
@@ -196,6 +201,8 @@ async function evaluateRoute(
     minVisibilityM: Number.isFinite(minVis) ? minVis : 10000,
     worstWeatherCode: worstWxCode,
     trafficPenalty: conflictDensity,
+    wxAvailable: wxList.filter((w) => w.available).length,
+    wxTotal: wxList.length,
   };
 }
 
@@ -255,16 +262,6 @@ function buildCandidates(o: LatLon, d: LatLon): Candidate[] {
   ];
 }
 
-// ── Traffic conflict detection ───────────────────────────────────────────────
-
-function timeToMinutes(t: string): number {
-  const [h, m] = (t ?? "00:00").split(":").map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
-function windowsOverlap(s1: string, e1: string, s2: string, e2: string): boolean {
-  return timeToMinutes(s1) < timeToMinutes(e2) && timeToMinutes(s2) < timeToMinutes(e1);
-}
-
 interface ConflictEntry { aircraft_id: string; conflict_type: string; severity: "high" | "moderate" | "low" }
 
 // ── Wind drift analysis ──────────────────────────────────────────────────────
@@ -291,97 +288,44 @@ function computeWindDrift(ev: RouteEval) {
 
 // ── Main handler ─────────────────────────────────────────────────────────────
 
-Deno.serve(async (req) => {
-  const corsHeaders = getCorsHeaders(req);
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Same normalisation as SQL od_key(): place name before the "@ lat,lon" tag. */
+const odKey = (s: string) => s.toLowerCase().split("@")[0].trim();
 
-  const json = (payload: unknown, status = 200) =>
-    new Response(JSON.stringify(payload), {
-      status,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-
-  try {
+serve("route-optimizer", async ({ req, admin: supabase, json, cors: corsHeaders, setUser }) => {
     const user = await requireUserAuth(req);
-
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-    );
+    setUser(user.id);
 
     const rl = await checkRateLimit(supabase, user.id, "route-optimizer", 30, 60);
     if (!rl.allowed) return tooManyRequests(corsHeaders, rl.windowSeconds);
 
-    const body = await req.json().catch(() => ({}));
-    const { aircraft_id, operator_name, origin, destination, altitude_band, departure_window_start, departure_window_end, flight_intent_id } = body;
+    const { flight_intent_id } = validateFields(await readBody(req), {
+      flight_intent_id: { required: true, type: "string", maxLength: 36, pattern: UUID },
+    }) as { flight_intent_id: string };
 
-    if (typeof origin !== "string" || !origin.trim() || typeof destination !== "string" || !destination.trim()) {
-      return json({ error: "origin and destination are required" }, 400);
+    // Everything comes from the stored, owned intent (server truth).
+    const { data: fi } = await supabase.from("flight_intents")
+      .select("id, aircraft_id, operator_name, origin, destination, altitude_band, departure_start_at, departure_end_at, origin_lat, origin_lon, dest_lat, dest_lon, status")
+      .eq("id", flight_intent_id).eq("user_id", user.id).maybeSingle();
+    if (!fi) throw httpError(403, "Flight intent not found or access denied");
+    if (fi.origin_lat == null || fi.dest_lat == null) {
+      throw httpError(422, "Origin or destination could not be located — pick locations from the search results");
     }
-    const band = typeof altitude_band === "string" && altitude_band ? altitude_band : "low";
-
-    // Ownership check when flight_intent_id is provided.
-    if (flight_intent_id) {
-      const { data: ownedIntent } = await supabase
-        .from("flight_intents")
-        .select("id")
-        .eq("id", flight_intent_id)
-        .eq("user_id", user.id)
-        .single();
-      if (!ownedIntent) {
-        return json({ error: "Flight intent not found or access denied" }, 403);
-      }
-    }
-
-    const originCoords = await getCoords(origin);
-    const destCoords = await getCoords(destination);
-    console.info("[route-optimizer] resolved coords", { originCoords, destCoords, user_id: user.id });
+    if (!fi.departure_start_at || !fi.departure_end_at) throw httpError(422, "Flight intent has no departure time — refile the flight");
+    const { aircraft_id, operator_name, origin, destination } = fi;
+    const band: string = fi.altitude_band ?? "low";
+    const departureStart = new Date(fi.departure_start_at);
+    const departureEnd = new Date(fi.departure_end_at);
+    const originCoords: LatLon = [fi.origin_lat, fi.origin_lon];
+    const destCoords: LatLon = [fi.dest_lat, fi.dest_lon];
 
     // ── 1. Generate candidates ──────────────────────────────────────────
     const candidates = buildCandidates(originCoords, destCoords);
 
-    // ── 2. Traffic conflict detection (fleet-wide — needed for safety) ──
-    const { data: existingIntents } = await supabase
-      .from("flight_intents")
-      .select("aircraft_id, origin, destination, altitude_band, departure_window_start, departure_window_end, status, id")
-      .in("status", ["analyzing", "pending", "approved", "active"])
-      .neq("id", flight_intent_id ?? "00000000-0000-0000-0000-000000000000")
-      .order("created_at", { ascending: false })
-      .limit(100);
-
-    // Coarse gate: only geocode intents whose raw departure window overlaps ours
-    // (bounds Nominatim calls). The spatiotemporal engine then does the precise
-    // crossing / separation / altitude / time-at-point check on that set.
-    const overlappingIntents = (existingIntents ?? []).filter((intent) =>
-      windowsOverlap(departure_window_start ?? "00:00", departure_window_end ?? "23:59", intent.departure_window_start, intent.departure_window_end),
-    );
-    const intentCoords = await Promise.all(
-      overlappingIntents.map(async (intent) => ({
-        intent,
-        origin: await getCoords(intent.origin),
-        dest: await getCoords(intent.destination),
-      })),
-    );
-
-    const candidateTrack: FlightTrack = {
-      id: flight_intent_id ?? "candidate",
-      aircraftId: aircraft_id ?? "CANDIDATE",
-      path: [{ lat: originCoords[0], lon: originCoords[1] }, { lat: destCoords[0], lon: destCoords[1] }],
-      depStartMin: toMin(departure_window_start) ?? 0,
-      depEndMin: toMin(departure_window_end) ?? 1439,
-      altitudeBand: band,
-      cruiseKmh: EVTOL_BASE_SPEED_KMH,
-    };
-    const otherTracks: FlightTrack[] = intentCoords.map(({ intent, origin: o, dest: d }) => ({
-      id: intent.id,
-      aircraftId: intent.aircraft_id,
-      path: [{ lat: o[0], lon: o[1] }, { lat: d[0], lon: d[1] }],
-      depStartMin: toMin(intent.departure_window_start) ?? 0,
-      depEndMin: toMin(intent.departure_window_end) ?? 1439,
-      altitudeBand: intent.altitude_band ?? "low",
-      cruiseKmh: EVTOL_BASE_SPEED_KMH,
-    }));
-
+    // ── 2. Traffic conflicts (fleet-wide, absolute time, stored coords) ──
+    const traffic = await loadTraffic(supabase, { start: departureStart, end: departureEnd, excludeId: fi.id });
+    const candidateTrack = trackFromRow({ ...fi, user_id: user.id });
+    const otherTracks = traffic.map((r) => trackFromRow(r, r.user_id === user.id ? r.aircraft_id : trafficLabel(r.id)));
     const conflictResult = checkNetwork(candidateTrack, otherTracks);
     const conflicts: ConflictEntry[] = conflictResult.conflicts.map((c) => ({
       aircraft_id: c.otherId,
@@ -402,7 +346,7 @@ Deno.serve(async (req) => {
     const noFlyZones = (noFlySegments ?? []).filter(s => s.boundary_polygon);
 
     // ── 4. Evaluate candidates ──────────────────────────────────────────
-    const wxCache = new WxCache();
+    const wxCache = new WxCache(departureStart);
     const evals = await Promise.all(candidates.map((c) => evaluateRoute(c.waypoints, wxCache, conflictDensity)));
     const fastestTime = Math.min(...evals.map((e) => e.timeMin));
     const shortestDist = Math.min(...evals.map((e) => e.distanceKm));
@@ -427,8 +371,8 @@ Deno.serve(async (req) => {
     }
 
     // ── 6. Historical bias — user-specific first, fleet fallback ────────
-    const originKey = origin.toLowerCase().split("@")[0].trim();
-    const destKey = destination.toLowerCase().split("@")[0].trim();
+    const originKey = odKey(origin);
+    const destKey = odKey(destination);
 
     // altitude_band is part of the unique key on route_patterns — omitting it
     // makes maybeSingle() error once the same OD pair exists at two bands.
@@ -532,8 +476,21 @@ Deno.serve(async (req) => {
     // ── 8. Persist route with user_id ───────────────────────────────────
     const weatherConditions = await wxCache.get(originCoords[0], originCoords[1]);
     const overallWxSeverity = top3[0]?.evaluation.avgWxSeverity ?? 0;
-    const weatherRisk: "low" | "moderate" | "high" =
-      overallWxSeverity >= 0.5 ? "high" : overallWxSeverity >= 0.25 ? "moderate" : "low";
+    const wxCoverage = top3[0] ? top3[0].evaluation.wxAvailable / Math.max(1, top3[0].evaluation.wxTotal) : 0;
+    // Missing forecast samples are NOT treated as calm weather.
+    const weatherRisk: "low" | "moderate" | "high" | "unknown" =
+      !weatherConditions.available || wxCoverage < 0.5 ? "unknown"
+        : overallWxSeverity >= 0.5 ? "high" : overallWxSeverity >= 0.25 ? "moderate" : "low";
+    const wxOut = weatherConditions.available ? {
+      wind_speed: Math.round(weatherConditions.windSpeedKmh),
+      wind_direction_deg: Math.round(weatherConditions.windFromDeg),
+      wind_gusts: Math.round(weatherConditions.windGustsKmh),
+      precipitation: weatherConditions.precipitationMm,
+      temperature: Number.isFinite(weatherConditions.temperatureC) ? Math.round(weatherConditions.temperatureC) : null,
+      weather_code: weatherConditions.weatherCode,
+      visibility: Number.isFinite(weatherConditions.visibilityM) ? Math.round(weatherConditions.visibilityM) : null,
+      valid_at: weatherConditions.validAt,
+    } : null;
 
     const { data: savedRoute, error: routeSaveErr } = await supabase
       .from("routes")
@@ -552,60 +509,29 @@ Deno.serve(async (req) => {
         traffic_score: primaryRoute.traffic_score,
         efficiency_score: primaryRoute.efficiency_score,
         conflict_details: conflicts,
-        weather_conditions: {
-          wind_speed: weatherConditions.windSpeedKmh,
-          wind_direction_deg: weatherConditions.windFromDeg,
-          wind_gusts: weatherConditions.windGustsKmh,
-          precipitation: weatherConditions.precipitationMm,
-          temperature: weatherConditions.temperatureC,
-          weather_code: weatherConditions.weatherCode,
-          visibility: weatherConditions.visibilityM,
-        },
+        weather_conditions: wxOut,
         weather_risk: weatherRisk,
         selection_reason: primaryRoute.operational_note,
         status: "active",
       })
       .select("id")
       .single();
-    if (routeSaveErr) {
-      console.error("[route-optimizer] routes insert failed", routeSaveErr.message);
-    }
+    // The decision engine reads this row — a missing row must fail loudly, not
+    // be papered over with a random id.
+    if (routeSaveErr || !savedRoute) throw new Error(`routes insert failed: ${routeSaveErr?.message ?? "no row"}`);
 
-    // ── 9. Upsert both user-specific and fleet route_patterns ────────────
-    const patternUpsert = async (uid: string | null, existing: any) => {
-      const n = (existing?.flight_count ?? 0) + 1;
-      const blend = (oldVal: number | null, fresh: number) =>
-        ((Number(oldVal ?? fresh) * (existing?.flight_count ?? 0)) + fresh) / n;
-      const data = {
-        origin_key: originKey,
-        destination_key: destKey,
-        altitude_band: band,
-        user_id: uid,
-        flight_count: n,
-        avg_overall_score: blend(existing?.avg_overall_score, primaryRoute.overall_score),
-        avg_safety_score: blend(existing?.avg_safety_score, primaryRoute.safety_score),
-        avg_weather_score: blend(existing?.avg_weather_score, primaryRoute.weather_score),
-        avg_traffic_score: blend(existing?.avg_traffic_score, primaryRoute.traffic_score),
-        avg_efficiency_score: blend(existing?.avg_efficiency_score, primaryRoute.efficiency_score),
-        preferred_waypoints: primaryRoute.waypoints,
-        last_updated: new Date().toISOString(),
-      };
-      const { error: upsertErr } = existing
-        ? await supabase.from("route_patterns").update(data).eq("id", existing.id)
-        : await supabase.from("route_patterns").insert({ ...data, flight_count: 1 });
-      if (upsertErr) {
-        console.error("[route-optimizer] route_patterns upsert failed", { uid, originKey, destKey, band, error: upsertErr.message });
-      }
+    // ── 9. Atomic running-average upserts (user + fleet) ─────────────────
+    const patternArgs = {
+      p_origin_key: originKey, p_dest_key: destKey, p_band: band,
+      p_overall: primaryRoute.overall_score, p_safety: primaryRoute.safety_score,
+      p_weather: primaryRoute.weather_score, p_traffic: primaryRoute.traffic_score,
+      p_efficiency: primaryRoute.efficiency_score, p_waypoints: primaryRoute.waypoints,
     };
-
-    await patternUpsert(user.id, userPattern ?? null);
-
-    const { data: fleetPattern } = await supabase
-      .from("route_patterns").select("*")
-      .eq("origin_key", originKey).eq("destination_key", destKey)
-      .eq("altitude_band", band).is("user_id", null)
-      .maybeSingle();
-    await patternUpsert(null, fleetPattern ?? null);
+    const upserts = await Promise.all([
+      supabase.rpc("upsert_route_pattern", { p_user: user.id, ...patternArgs }),
+      supabase.rpc("upsert_route_pattern", { p_user: null, ...patternArgs }),
+    ]);
+    for (const u of upserts) if (u.error) console.error("[route-optimizer] upsert_route_pattern failed", u.error.message);
 
     const historicalSuggestion = pattern && pattern.flight_count >= 2
       ? {
@@ -622,20 +548,13 @@ Deno.serve(async (req) => {
       : { found: false };
 
     return json({
-      route_id: savedRoute?.id ?? crypto.randomUUID(),
+      route_id: savedRoute.id,
       top_routes: routes,
       primary_route: primaryRoute,
       alternate_routes: alternateRoutes,
       conflict_details: conflicts,
-      weather_conditions: {
-        wind_speed: Math.round(weatherConditions.windSpeedKmh),
-        wind_direction_deg: Math.round(weatherConditions.windFromDeg),
-        wind_gusts: Math.round(weatherConditions.windGustsKmh),
-        precipitation: weatherConditions.precipitationMm,
-        temperature: Math.round(weatherConditions.temperatureC),
-        weather_code: weatherConditions.weatherCode,
-        visibility: Math.round(weatherConditions.visibilityM),
-      },
+      weather_conditions: wxOut,
+      weather_data: { available_samples: top3[0]?.evaluation.wxAvailable ?? 0, total_samples: top3[0]?.evaluation.wxTotal ?? 0, valid_for: departureStart.toISOString() },
       weather_risk: weatherRisk,
       historical_suggestion: historicalSuggestion,
       // Traceable conflict-check result (honest status: checked_clear vs
@@ -656,13 +575,4 @@ Deno.serve(async (req) => {
         scoring_weights: weights,
       },
     });
-  } catch (error: unknown) {
-    if (error instanceof Response) return error;
-    const message = error instanceof Error ? error.message : String(error);
-    console.error("Route optimizer error:", message);
-    return new Response(JSON.stringify({ error: "Internal server error" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
 });

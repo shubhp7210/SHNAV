@@ -1,0 +1,75 @@
+name: Nightly backup + restore drill
+
+# Every night: dump the production database, RESTORE it into a fresh Postgres 17,
+# and fail unless every table's row count matches the source. The encrypted
+# dump is kept as an artifact for 30 days. (This complements — does not
+# replace — Supabase's own daily backups / PITR, which depend on your plan.)
+on:
+  schedule:
+    - cron: "30 4 * * *"   # 04:30 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    services:
+      restore:
+        image: postgres:17
+        env: { POSTGRES_PASSWORD: postgres }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      RESTORE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-17
+
+      - name: Dump (consistent snapshot) + capture row counts
+        run: |
+          /usr/lib/postgresql/17/bin/pg_dump "$SUPABASE_DB_URL" -Fc --no-owner --no-privileges \
+            --schema=public --schema=app_private -f backup.dump
+          node scripts/backup-verify.mjs --capture "$SUPABASE_DB_URL" --schemas public,app_private > counts.json
+          ls -lh backup.dump
+
+      - name: Restore into a fresh Postgres 17
+        run: |
+          PSQL=/usr/lib/postgresql/17/bin/psql
+          $PSQL "$RESTORE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/bootstrap.sql
+          # Data is loaded with triggers off (FKs to auth.users, archive trigger).
+          /usr/lib/postgresql/17/bin/pg_restore --no-owner --no-privileges --disable-triggers \
+            -d "$RESTORE_URL" backup.dump 2> restore.log || true
+          # Extension/role noise is expected on vanilla Postgres; data errors are not.
+          if grep -E "ERROR: .*(COPY|duplicate key|violates|invalid input)" restore.log; then
+            echo "::error::data errors during restore"; exit 1
+          fi
+
+      - name: Verify every table restored with exact row counts
+        run: node scripts/backup-verify.mjs --counts counts.json --restored "$RESTORE_URL" --schemas public,app_private
+
+      - name: Encrypt
+        env: { BACKUP_PASSPHRASE: "${{ secrets.BACKUP_PASSPHRASE }}" }
+        run: |
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
+            --symmetric --cipher-algo AES256 -o "backup-$(date -u +%Y%m%dT%H%MZ).dump.gpg" backup.dump
+          rm backup.dump
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: db-backup-${{ github.run_id }}
+          path: backup-*.dump.gpg
+          retention-days: 30

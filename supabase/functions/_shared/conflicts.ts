@@ -29,7 +29,8 @@ export interface FlightTrack {
   aircraftId: string;
   /** Route polyline (>= 2 points), [{lat,lon}...]. */
   path: Pt[];
-  /** Departure window, minutes-of-day [start, end]. */
+  /** Departure window [start, end] in ABSOLUTE minutes (use epochMinutes() from
+   *  departure.ts). Minutes-of-day made flights on different dates collide. */
   depStartMin: number;
   depEndMin: number;
   altitudeBand: string;      // "low" | "mid" | "high" | ...
@@ -142,7 +143,7 @@ export function detectPair(a: FlightTrack, b: FlightTrack): Conflict | null {
     let nb = sb[0], ndist = Infinity;
     for (const B of sb) { const d = haversineKm(A.p, B.p); if (d < ndist) { ndist = d; nb = B; } }
     if (ndist >= SEP_H_KM) continue;
-    // occupancy windows at these along-route points (absolute minutes of day)
+    // occupancy windows at these along-route points (absolute minutes)
     const aStart = a.depStartMin + A.alongMin, aEnd = a.depEndMin + A.alongMin;
     const bStart = b.depStartMin + nb.alongMin, bEnd = b.depEndMin + nb.alongMin;
     const overlap = intervalsOverlap(aStart, aEnd, bStart, bEnd);

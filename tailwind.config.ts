@@ -16,7 +16,7 @@ export default {
       fontFamily: {
         sans: ["Plus Jakarta Sans", "system-ui", "-apple-system", "sans-serif"],
         mono: ["JetBrains Mono", "monospace"],
-        display: ["Plus Jakarta Sans", "system-ui", "sans-serif"],
+        display: ["Space Grotesk", "Plus Jakarta Sans", "system-ui", "sans-serif"],
       },
       letterSpacing: {
         tightest: "-0.04em",
@@ -35,6 +35,9 @@ export default {
           DEFAULT: "hsl(var(--secondary))",
           foreground: "hsl(var(--secondary-foreground))",
         },
+        signal: "hsl(var(--signal))",
+        caution: "hsl(var(--caution))",
+        success: "hsl(var(--success))",
         destructive: {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
@@ -65,6 +68,9 @@ export default {
           border: "hsl(var(--sidebar-border))",
           ring: "hsl(var(--sidebar-ring))",
         },
+      },
+      boxShadow: {
+        elev: "var(--shadow-elev)",
       },
       borderRadius: {
         lg: "var(--radius)",

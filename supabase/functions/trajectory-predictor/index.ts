@@ -1,158 +1,113 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import {
-  getCorsHeaders,
-  EVTOL_BASE_SPEED_KMH as EVTOL_SPEED_KMH,
-  MIN_SEPARATION_KM,
-} from "../_shared/constants.ts";
+// Short-horizon (5 min) conflict prediction for the caller's live flights,
+// polled by the monitoring screen.
+//
+//  • Fleet-wide: the caller's flights are checked against ALL live traffic
+//    (previously only against their own fleet). Other operators appear as
+//    anonymous "TFC-xxxx" labels — no registrations or routes are exposed.
+//  • In-air flights are included (status "in_air" was missing from the filter,
+//    so a flight dropped out of prediction the moment it took off).
+//  • Positions come from stored coordinates + absolute departure time — no
+//    per-poll geocoding (that was an N+1 against Nominatim every 5 seconds).
+import { serve } from "../_shared/http.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
 import { checkRateLimit, tooManyRequests } from "../_shared/ratelimit.ts";
-import { getCoords } from "../_shared/geocode.ts";
+import { readBody, validateFields } from "../_shared/validate.ts";
+import { EVTOL_BASE_SPEED_KMH, MIN_SEPARATION_KM } from "../_shared/constants.ts";
 import { haversineKm, interpolatePosition } from "../_shared/geo.ts";
+import { loadTraffic, type TrafficRow } from "../_shared/traffic.ts";
+import { trafficLabel } from "../_shared/anonymize.ts";
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const HORIZON_MIN = 5;
 
-Deno.serve(async (req) => {
-  const corsHeaders = getCorsHeaders(req);
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+interface Prediction {
+  flight_intent_id: string | null;
+  aircraft_id: string;
+  own: boolean;
+  altitude_band: string;
+  current_progress: number;
+  predicted_positions: { t_plus_min: number; lat: number; lon: number; altitude_band: string }[];
+  status: string;
+}
 
-  try {
-    const user = await requireUserAuth(req);
+function predict(r: TrafficRow, own: boolean, now: number): Prediction | null {
+  if (r.origin_lat == null || r.dest_lat == null || !r.departure_start_at) return null;
+  const dist = haversineKm(r.origin_lat, r.origin_lon!, r.dest_lat, r.dest_lon!);
+  const durMs = Math.max(1, (dist / EVTOL_BASE_SPEED_KMH) * 3_600_000);
+  const elapsed = now - new Date(r.departure_start_at).getTime();
+  // Not departing within the horizon: it's on the pad, not traffic.
+  if (elapsed + HORIZON_MIN * 60_000 < 0) return null;
+  const positions = [];
+  for (let m = 0; m <= HORIZON_MIN; m++) {
+    const p = Math.min(1, Math.max(0, (elapsed + m * 60_000) / durMs));
+    positions.push({ t_plus_min: m, ...interpolatePosition(r.origin_lat, r.origin_lon!, r.dest_lat, r.dest_lon!, p), altitude_band: r.altitude_band ?? "low" });
+  }
+  return {
+    flight_intent_id: own ? r.id : null,
+    aircraft_id: own ? r.aircraft_id : trafficLabel(r.id),
+    own,
+    altitude_band: r.altitude_band ?? "low",
+    current_progress: Math.round(Math.min(1, Math.max(0, elapsed / durMs)) * 100),
+    predicted_positions: positions,
+    status: r.status,
+  };
+}
 
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-    );
+serve("trajectory-predictor", async ({ req, admin, json, cors, setUser }) => {
+  const user = await requireUserAuth(req);
+  setUser(user.id);
+  const rl = await checkRateLimit(admin, user.id, "trajectory-predictor", 120, 60);
+  if (!rl.allowed) return tooManyRequests(cors, rl.windowSeconds);
 
-    const rl = await checkRateLimit(supabase, user.id, "trajectory-predictor", 120, 60);
-    if (!rl.allowed) return tooManyRequests(corsHeaders, rl.windowSeconds);
+  const { flight_intent_id } = validateFields(await readBody(req), {
+    flight_intent_id: { type: "string", maxLength: 36, pattern: UUID },
+  }) as { flight_intent_id?: string };
 
-    const { flight_intent_id } = await req.json();
-    console.info("[trajectory-predictor] received request", { flight_intent_id, user_id: user.id });
+  const now = Date.now();
+  // Flights departing or airborne around now (±2 h covers any eVTOL leg here).
+  const traffic = await loadTraffic(admin, { start: new Date(now), end: new Date(now), marginH: 2 });
+  const preds = traffic
+    .map((r) => predict(r, r.user_id === user.id, now))
+    .filter((p): p is Prediction => p !== null && p.current_progress < 100);
+  const mine = preds.filter((p) => p.own && (!flight_intent_id || p.flight_intent_id === flight_intent_id));
 
-    // Fetch only this user's active flights — never expose other operators' data.
-    const { data: activeFlights } = await supabase
-      .from("flight_intents")
-      .select("id, aircraft_id, origin, destination, altitude_band, departure_window_start, departure_window_end, scheduled_departure, created_at, status")
-      .in("status", ["active", "approved", "pending"])
-      .eq("user_id", user.id)
-      .limit(50);
-
-    const flights = activeFlights ?? [];
-    const now = Date.now();
-
-    // departure_window_start is a TEXT "HH:MM" column — it is NOT parseable by
-    // new Date(). Use the real timestamps we have: scheduled_departure when the
-    // client provided one, otherwise fall back to created_at.
-    const departureMs = (f: { scheduled_departure?: string | null; created_at?: string | null }): number => {
-      for (const raw of [f.scheduled_departure, f.created_at]) {
-        if (!raw) continue;
-        const t = new Date(raw).getTime();
-        if (Number.isFinite(t)) return t;
-      }
-      return now;
-    };
-
-    const predictions = await Promise.all(flights.map(async (f: any) => {
-      const [oLat, oLon] = await getCoords(f.origin ?? "");
-      const [dLat, dLon] = await getCoords(f.destination ?? "");
-      const depStart = departureMs(f);
-      const totalDistKm = haversineKm(oLat, oLon, dLat, dLon);
-      const totalDurationMs = Math.max(1, (totalDistKm / EVTOL_SPEED_KMH) * 3600 * 1000);
-      const elapsed = Math.max(0, now - depStart);
-      const progress = Math.min(1, elapsed / totalDurationMs);
-
-      const positions: Array<{ t_plus_min: number; lat: number; lon: number; altitude_band: string }> = [];
-      for (const min of [0, 1, 2, 3, 4, 5]) {
-        const futureElapsed = elapsed + min * 60 * 1000;
-        const futureProgress = Math.min(1, futureElapsed / totalDurationMs);
-        const pos = interpolatePosition(oLat, oLon, dLat, dLon, futureProgress);
-        positions.push({ t_plus_min: min, ...pos, altitude_band: f.altitude_band });
-      }
-
-      return {
-        flight_intent_id: f.id,
-        aircraft_id: f.aircraft_id,
-        altitude_band: f.altitude_band,
-        current_progress: Math.round(progress * 100),
-        predicted_positions: positions,
-        origin: f.origin,
-        destination: f.destination,
-        status: f.status,
-      };
-    }));
-
-    // Detect conflicts within the user's own fleet.
-    const conflicts: Array<{
-      aircraft_a: string;
-      aircraft_b: string;
-      t_plus_min: number;
-      separation_km: number;
-      severity: string;
-      resolution: { type: string; action: string };
-    }> = [];
-
-    for (let i = 0; i < predictions.length; i++) {
-      for (let j = i + 1; j < predictions.length; j++) {
-        const a = predictions[i];
-        const b = predictions[j];
-        if (a.altitude_band !== b.altitude_band) continue;
-
-        for (const posA of a.predicted_positions) {
-          const posB = b.predicted_positions.find(p => p.t_plus_min === posA.t_plus_min);
-          if (!posB) continue;
-          const sep = haversineKm(posA.lat, posA.lon, posB.lat, posB.lon);
-          if (sep < MIN_SEPARATION_KM * 3) {
-            const severity = sep < MIN_SEPARATION_KM ? "high" : sep < MIN_SEPARATION_KM * 2 ? "moderate" : "low";
-            let resolution: { type: string; action: string };
-            if (severity === "high") {
-              resolution = { type: "altitude_adjustment", action: `Move ${b.aircraft_id} to ${b.altitude_band === "low" ? "mid" : "low"} altitude band immediately` };
-            } else if (severity === "moderate") {
-              resolution = { type: "speed_adjustment", action: `Reduce speed of ${b.aircraft_id} by 20% for 2 minutes` };
-            } else {
-              resolution = { type: "route_deviation", action: `Apply 0.3km lateral offset to ${b.aircraft_id} route` };
-            }
-            conflicts.push({
-              aircraft_a: a.aircraft_id,
-              aircraft_b: b.aircraft_id,
-              t_plus_min: posA.t_plus_min,
-              separation_km: Math.round(sep * 100) / 100,
-              severity,
-              resolution,
-            });
-            break;
-          }
-        }
+  const conflicts: {
+    aircraft_a: string; aircraft_b: string; t_plus_min: number; separation_km: number;
+    severity: "high" | "moderate" | "low"; resolution: { type: string; action: string };
+  }[] = [];
+  for (const a of mine) {
+    for (const b of preds) {
+      if (a === b || a.altitude_band !== b.altitude_band) continue;
+      if (b.own && mine.includes(b) && mine.indexOf(b) < mine.indexOf(a)) continue; // own pairs once
+      for (const pa of a.predicted_positions) {
+        const pb = b.predicted_positions[pa.t_plus_min];
+        const sep = haversineKm(pa.lat, pa.lon, pb.lat, pb.lon);
+        if (sep >= MIN_SEPARATION_KM * 3) continue;
+        const severity = sep < MIN_SEPARATION_KM ? "high" : sep < MIN_SEPARATION_KM * 2 ? "moderate" : "low";
+        const other = a.altitude_band === "low" ? "mid" : "low";
+        conflicts.push({
+          aircraft_a: a.aircraft_id, aircraft_b: b.aircraft_id, t_plus_min: pa.t_plus_min,
+          separation_km: Math.round(sep * 100) / 100, severity,
+          resolution: severity === "high"
+            ? { type: "altitude_adjustment", action: `Move ${a.aircraft_id} to the ${other} band now` }
+            : severity === "moderate"
+              ? { type: "speed_adjustment", action: `Reduce ${a.aircraft_id} speed by 20% for 2 minutes` }
+              : { type: "route_deviation", action: `Apply a 0.3 km lateral offset to ${a.aircraft_id}` },
+        });
+        break;
       }
     }
-
-    const activeCount = predictions.filter(p => p.current_progress > 0 && p.current_progress < 100).length;
-    const conflictPenalty = conflicts.length * 5;
-    const flowEfficiency = Math.max(0, 100 - conflictPenalty);
-
-    const myFlight = predictions.find(p => p.flight_intent_id === flight_intent_id);
-    const myConflicts = conflicts.filter(c => c.aircraft_a === myFlight?.aircraft_id || c.aircraft_b === myFlight?.aircraft_id);
-
-    console.info("[trajectory-predictor] prediction summary", {
-      user_id: user.id,
-      flight_intent_id,
-      total_predictions: predictions.length,
-      total_conflicts: conflicts.length,
-    });
-
-    return new Response(JSON.stringify({
-      predictions: flight_intent_id ? [myFlight ?? null] : predictions,
-      future_conflicts: flight_intent_id ? myConflicts : conflicts,
-      total_active_flights: activeCount,
-      system_flow_efficiency: flowEfficiency,
-      total_conflicts_detected: conflicts.length,
-      high_severity_conflicts: conflicts.filter(c => c.severity === "high").length,
-      analysis_horizon_minutes: 5,
-    }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-  } catch (err) {
-    if (err instanceof Response) return err;
-    console.error("[edge] unhandled error:", err);
-    return new Response(JSON.stringify({ error: "Internal server error" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
   }
+
+  const airborne = preds.filter((p) => p.current_progress > 0).length;
+  return json({
+    predictions: mine,
+    future_conflicts: conflicts,
+    total_active_flights: airborne,
+    system_flow_efficiency: Math.max(0, 100 - conflicts.length * 5),
+    total_conflicts_detected: conflicts.length,
+    high_severity_conflicts: conflicts.filter((c) => c.severity === "high").length,
+    analysis_horizon_minutes: HORIZON_MIN,
+    traffic_considered: preds.length,
+  });
 });

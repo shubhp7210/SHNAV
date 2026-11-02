@@ -60,10 +60,10 @@ export default function TrajectoryConflictAlert({ data }: Props) {
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, delay: 0.25 }}
-      className="rounded-xl border border-white/10 bg-white/5 overflow-hidden"
+      className="panel rounded-2xl overflow-hidden"
     >
-      <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
-        <span className="text-xs font-semibold text-white/60 uppercase tracking-widest">Trajectory Prediction</span>
+      <div className="flex items-center justify-between px-5 py-3 border-b border-border">
+        <span className="label-caps text-foreground/75">Trajectory Prediction</span>
         <span className={`text-xs font-bold ${data.high_severity_conflicts > 0 ? "text-red-400" : hasConflicts ? "text-amber-400" : "text-emerald-400"}`}>
           {data.total_conflicts_detected} CONFLICT{data.total_conflicts_detected !== 1 ? "S" : ""} DETECTED
         </span>
@@ -72,17 +72,17 @@ export default function TrajectoryConflictAlert({ data }: Props) {
       <div className="p-5 space-y-4">
         {/* System flow */}
         <div className="grid grid-cols-3 gap-2">
-          <div className="bg-black/20 rounded-lg p-2.5 text-center">
+          <div className="well rounded-lg p-2.5 text-center">
             <p className="text-[10px] text-white/40">Active Flights</p>
             <p className="text-lg font-bold text-white">{data.total_active_flights}</p>
           </div>
-          <div className="bg-black/20 rounded-lg p-2.5 text-center">
+          <div className="well rounded-lg p-2.5 text-center">
             <p className="text-[10px] text-white/40">Flow Efficiency</p>
             <p className={`text-lg font-bold ${data.system_flow_efficiency >= 80 ? "text-emerald-400" : data.system_flow_efficiency >= 60 ? "text-amber-400" : "text-red-400"}`}>
               {data.system_flow_efficiency}%
             </p>
           </div>
-          <div className="bg-black/20 rounded-lg p-2.5 text-center">
+          <div className="well rounded-lg p-2.5 text-center">
             <p className="text-[10px] text-white/40">Horizon</p>
             <p className="text-lg font-bold text-white">{data.analysis_horizon_minutes}m</p>
           </div>

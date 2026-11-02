@@ -1,166 +1,126 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { getCorsHeaders } from "../_shared/constants.ts";
+// Weather for the Step 2 clearance, evaluated AT THE DEPARTURE TIME from
+// Open-Meteo's 15-minute forecast: departure, +15 min and +30 min at the
+// origin, and the destination at the estimated arrival time.
+//
+// Removed: the invented "urban heat island +2.5 °C / +15 % gusts" adjustment
+// and the silent 5 km/h "neutral" defaults. If the forecast can't be fetched
+// this returns 503 — the decision engine then refuses to issue a GO.
+import { serve, httpError } from "../_shared/http.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
-import { getCoords } from "../_shared/geocode.ts";
-import { readBody, validateFields } from "../_shared/validate.ts";
 import { checkRateLimit, tooManyRequests } from "../_shared/ratelimit.ts";
-import {
-  computeRisk,
-  riskLevel,
-  weatherCodeToDescription,
-} from "../_shared/weather.ts";
+import { readBody, validateFields } from "../_shared/validate.ts";
+import { resolveLocation } from "../_shared/geocode.ts";
+import { fetchForecastPoints, computeRisk, riskLevel, weatherCodeToDescription } from "../_shared/weather.ts";
+import { pointAt, type WxPoint } from "../_shared/forecast.ts";
+import { EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
+import { haversineKm } from "../_shared/geo.ts";
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const risk = (p: WxPoint) => computeRisk(p.windSpeedKmh, p.windGustsKmh, p.precipitationMm, p.weatherCode);
 
-function applyMicroWeather(windSpeed: number, gusts: number, temp: number) {
-  return {
-    adjusted_temp: temp + 2.5,
-    adjusted_gusts: gusts * 1.15,
-    adjusted_wind: windSpeed * 1.05,
-    micro_effects: ["Urban heat island effect (+2.5°C)", "Wind channeling in corridors (+15% gusts)"],
-  };
-}
+serve("weather-intelligence", async ({ req, admin, json, cors, setUser }) => {
+  const user = await requireUserAuth(req);
+  setUser(user.id);
+  const rl = await checkRateLimit(admin, user.id, "weather-intelligence", 60, 60);
+  if (!rl.allowed) return tooManyRequests(cors, rl.windowSeconds);
 
-Deno.serve(async (req) => {
-  const corsHeaders = getCorsHeaders(req);
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  const body = validateFields(await readBody(req), {
+    flight_intent_id: { type: "string", maxLength: 36, pattern: UUID },
+    origin:           { type: "string", maxLength: 256 },
+    destination:      { type: "string", maxLength: 256 },
+    altitude_band:    { type: "string", oneOf: ["low", "mid", "high"] },
+    departure_at:     { type: "string", maxLength: 40 },
+  }) as Record<string, string | undefined>;
 
-  try {
-    const user = await requireUserAuth(req);
-
-    const admin = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-    );
-    const rl = await checkRateLimit(admin, user.id, "weather-intelligence", 60, 60);
-    if (!rl.allowed) return tooManyRequests(corsHeaders, rl.windowSeconds);
-
-    const body = await readBody(req);
-    const { origin, destination, altitude_band } = validateFields(body, {
-      origin: { type: "string", maxLength: 200 },
-      destination: { type: "string", maxLength: 200 },
-      altitude_band: { type: "string", oneOf: ["low", "mid", "high"] },
-    }) as { origin?: string; destination?: string; altitude_band?: string };
-    const [oLat, oLon] = await getCoords(origin ?? "");
-    const [dLat, dLon] = await getCoords(destination ?? "");
-
-    const params = "wind_speed_10m,wind_gusts_10m,precipitation,temperature_2m,weather_code,visibility";
-    const hourlyParams = "wind_speed_10m,wind_gusts_10m,precipitation,weather_code,temperature_2m";
-
-    const [originRes, destRes] = await Promise.allSettled([
-      fetch(`https://api.open-meteo.com/v1/forecast?latitude=${oLat}&longitude=${oLon}&current=${params}&hourly=${hourlyParams}&forecast_days=1&wind_speed_unit=kmh`),
-      fetch(`https://api.open-meteo.com/v1/forecast?latitude=${dLat}&longitude=${dLon}&current=${params}&hourly=${hourlyParams}&forecast_days=1&wind_speed_unit=kmh`),
-    ]);
-
-    let originData: any = null, destData: any = null;
-    if (originRes.status === "fulfilled" && originRes.value.ok) originData = await originRes.value.json();
-    if (destRes.status === "fulfilled" && destRes.value.ok) destData = await destRes.value.json();
-
-    const oc = originData?.current ?? {};
-    const dc = destData?.current ?? {};
-
-    const windSpeed = oc.wind_speed_10m ?? 5;
-    const gusts = oc.wind_gusts_10m ?? 7;
-    const precip = oc.precipitation ?? 0;
-    const temp = oc.temperature_2m ?? 20;
-    const weatherCode = oc.weather_code ?? 0;
-    const visibility = oc.visibility ?? 10000;
-
-    const micro = applyMicroWeather(windSpeed, gusts, temp);
-    const currentRiskScore = computeRisk(micro.adjusted_wind, micro.adjusted_gusts, precip, weatherCode);
-    const currentRiskLevel = riskLevel(currentRiskScore);
-    const altitudeMultiplier = altitude_band === "high" ? 1.3 : altitude_band === "mid" ? 1.15 : 1.0;
-    const altAdjustedRisk = Math.min(100, Math.round(currentRiskScore * altitudeMultiplier));
-
-    const now = new Date();
-    const currentHour = now.getHours();
-    const oh = originData?.hourly ?? {};
-
-    function getForecastRisk(hourOffset: number): number {
-      const idx = Math.min(currentHour + hourOffset, 23);
-      const fw = oh.wind_speed_10m?.[idx] ?? windSpeed;
-      const fg = oh.wind_gusts_10m?.[idx] ?? gusts;
-      const fp = oh.precipitation?.[idx] ?? precip;
-      const fc = oh.weather_code?.[idx] ?? weatherCode;
-      return computeRisk(fw * 1.05, fg * 1.15, fp, fc);
-    }
-
-    const risk15 = getForecastRisk(0);
-    const risk30 = getForecastRisk(1);
-    const volatility = Math.abs(risk30 - currentRiskScore);
-    const uncertainty15 = Math.min(25, 8 + volatility * 0.3);
-    const uncertainty30 = Math.min(40, 15 + volatility * 0.5);
-
-    const dw = dc.wind_speed_10m ?? 5;
-    const dg = dc.wind_gusts_10m ?? 7;
-    const dp = dc.precipitation ?? 0;
-    const dc_code = dc.weather_code ?? 0;
-    const destRiskScore = computeRisk(dw * 1.05, dg * 1.15, dp, dc_code);
-    const destRiskLevel = riskLevel(destRiskScore);
-
-    let recommendation: "proceed" | "delay" | "reroute" = "proceed";
-    let recommendationReason = "Conditions are suitable for flight.";
-    let suggestedDelayMinutes = 0;
-    let suggestedAltBand: string | null = null;
-
-    if (altAdjustedRisk >= 60) {
-      if (risk30 < currentRiskScore - 15) {
-        recommendation = "delay";
-        suggestedDelayMinutes = 30;
-        recommendationReason = `High weather risk now (${altAdjustedRisk}/100). Conditions improve in ~30 minutes.`;
-      } else {
-        recommendation = "reroute";
-        recommendationReason = `High weather risk (${altAdjustedRisk}/100). Suggest alternate altitude band or corridor.`;
-        suggestedAltBand = altitude_band === "high" ? "mid" : altitude_band === "mid" ? "low" : "mid";
-      }
-    } else if (altAdjustedRisk >= 35) {
-      if (risk15 < currentRiskScore - 10) {
-        recommendation = "delay";
-        suggestedDelayMinutes = 15;
-        recommendationReason = `Moderate weather risk (${altAdjustedRisk}/100). Short delay of 15 min should improve conditions.`;
-      } else {
-        recommendation = "proceed";
-        recommendationReason = `Moderate weather risk (${altAdjustedRisk}/100) but stable. Proceed with caution.`;
-      }
-    }
-
-    return new Response(JSON.stringify({
-      origin_weather: {
-        wind_speed: Math.round(micro.adjusted_wind),
-        wind_gusts: Math.round(micro.adjusted_gusts),
-        precipitation: precip,
-        temperature: Math.round(micro.adjusted_temp),
-        weather_code: weatherCode,
-        weather_description: weatherCodeToDescription(weatherCode),
-        visibility_m: visibility,
-        risk_score: altAdjustedRisk,
-        risk_level: currentRiskLevel,
-        micro_effects: micro.micro_effects,
-      },
-      destination_weather: {
-        wind_speed: Math.round(dw),
-        wind_gusts: Math.round(dg),
-        precipitation: dp,
-        risk_score: destRiskScore,
-        risk_level: destRiskLevel,
-        weather_description: weatherCodeToDescription(dc_code),
-      },
-      forecast: {
-        t_plus_15: { risk_score: Math.round(risk15 * altitudeMultiplier), uncertainty_pct: Math.round(uncertainty15) },
-        t_plus_30: { risk_score: Math.round(risk30 * altitudeMultiplier), uncertainty_pct: Math.round(uncertainty30) },
-        trend: risk30 < currentRiskScore ? "improving" : risk30 > currentRiskScore ? "degrading" : "stable",
-      },
-      recommendation,
-      recommendation_reason: recommendationReason,
-      suggested_delay_minutes: suggestedDelayMinutes,
-      suggested_altitude_band: suggestedAltBand,
-      altitude_risk_modifier: altitudeMultiplier,
-    }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-  } catch (err) {
-    if (err instanceof Response) return err;
-    console.error("[edge] unhandled error:", err);
-    return new Response(JSON.stringify({ error: "Internal server error" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+  // Prefer the stored, owned intent (server truth); fall back to explicit inputs.
+  let o: { lat: number; lon: number } | null = null, d: { lat: number; lon: number } | null = null;
+  let departAt = body.departure_at ? new Date(body.departure_at) : new Date();
+  let band = body.altitude_band ?? "low";
+  if (body.flight_intent_id) {
+    const { data: fi } = await admin.from("flight_intents")
+      .select("origin_lat, origin_lon, dest_lat, dest_lon, departure_start_at, altitude_band")
+      .eq("id", body.flight_intent_id).eq("user_id", user.id).maybeSingle();
+    if (!fi) throw httpError(403, "Flight intent not found or access denied");
+    if (fi.origin_lat != null) o = { lat: fi.origin_lat, lon: fi.origin_lon };
+    if (fi.dest_lat != null) d = { lat: fi.dest_lat, lon: fi.dest_lon };
+    if (fi.departure_start_at) departAt = new Date(fi.departure_start_at);
+    band = fi.altitude_band ?? band;
+  } else {
+    [o, d] = await Promise.all([resolveLocation(admin, body.origin), resolveLocation(admin, body.destination)]);
   }
+  if (!Number.isFinite(departAt.getTime())) throw httpError(400, "departure_at is not a valid timestamp");
+  if (!o) return json({ error: "weather_unavailable", reason: "Origin location could not be resolved" }, 503);
+
+  const flightMin = d ? (haversineKm(o.lat, o.lon, d.lat, d.lon) / EVTOL_BASE_SPEED_KMH) * 60 : 0;
+  const arriveAt = new Date(departAt.getTime() + flightMin * 60_000);
+  const [oPts, dPts] = await Promise.all([
+    fetchForecastPoints(o.lat, o.lon, departAt),
+    d ? fetchForecastPoints(d.lat, d.lon, arriveAt) : Promise.resolve([]),
+  ]);
+  const now = pointAt(oPts, departAt);
+  const p15 = pointAt(oPts, new Date(departAt.getTime() + 15 * 60_000));
+  const p30 = pointAt(oPts, new Date(departAt.getTime() + 30 * 60_000));
+  const dest = d ? pointAt(dPts, arriveAt) : null;
+  if (!now) return json({ error: "weather_unavailable", reason: "Open-Meteo forecast unavailable for the departure time" }, 503);
+
+  // Higher bands see stronger wind; risk is scaled (documented, not hidden).
+  const altitudeMultiplier = band === "high" ? 1.3 : band === "mid" ? 1.15 : 1.0;
+  const base = risk(now);
+  const scaled = (r: number) => Math.min(100, Math.round(r * altitudeMultiplier));
+  const r0 = scaled(base);
+  const r15 = p15 ? scaled(risk(p15)) : r0;
+  const r30 = p30 ? scaled(risk(p30)) : r15;
+  const spread = Math.abs(r30 - r0);
+
+  let recommendation: "proceed" | "delay" | "reroute" = "proceed";
+  let reason = "Conditions at departure are within limits.";
+  let delayMin = 0;
+  let altBand: string | null = null;
+  if (r0 >= 60) {
+    if (r30 < r0 - 15) { recommendation = "delay"; delayMin = 30; reason = `High risk at departure (${r0}/100); forecast improves to ${r30}/100 by +30 min.`; }
+    else { recommendation = "reroute"; altBand = band === "high" ? "mid" : band === "mid" ? "low" : "mid"; reason = `High risk at departure (${r0}/100) with no improvement forecast.`; }
+  } else if (r0 >= 35) {
+    if (r15 < r0 - 10) { recommendation = "delay"; delayMin = 15; reason = `Moderate risk (${r0}/100) improving to ${r15}/100 within 15 min.`; }
+    else reason = `Moderate risk (${r0}/100), stable — proceed with caution.`;
+  }
+
+  return json({
+    data_status: "live",
+    source: "open-meteo minutely_15",
+    valid_at: now.time,
+    origin_weather: {
+      wind_speed: Math.round(now.windSpeedKmh),
+      wind_direction_deg: Math.round(now.windFromDeg),
+      wind_gusts: Math.round(now.windGustsKmh),
+      precipitation: now.precipitationMm,
+      temperature: Number.isFinite(now.temperatureC) ? Math.round(now.temperatureC) : null,
+      weather_code: now.weatherCode,
+      weather_description: weatherCodeToDescription(now.weatherCode),
+      visibility_m: Number.isFinite(now.visibilityM) ? Math.round(now.visibilityM) : null,
+      risk_score: r0,
+      risk_level: riskLevel(r0),
+      micro_effects: [],
+    },
+    destination_weather: dest ? {
+      wind_speed: Math.round(dest.windSpeedKmh),
+      wind_gusts: Math.round(dest.windGustsKmh),
+      precipitation: dest.precipitationMm,
+      weather_code: dest.weatherCode,
+      risk_score: risk(dest),
+      risk_level: riskLevel(risk(dest)),
+      weather_description: weatherCodeToDescription(dest.weatherCode),
+      valid_at: dest.time,
+    } : null,
+    forecast: {
+      // Uncertainty grows with lead time and with forecast volatility.
+      t_plus_15: { risk_score: r15, uncertainty_pct: Math.round(Math.min(25, 8 + spread * 0.3)) },
+      t_plus_30: { risk_score: r30, uncertainty_pct: Math.round(Math.min(40, 15 + spread * 0.5)) },
+      trend: r30 < r0 ? "improving" : r30 > r0 ? "degrading" : "stable",
+    },
+    recommendation,
+    recommendation_reason: reason,
+    suggested_delay_minutes: delayMin,
+    suggested_altitude_band: altBand,
+    altitude_risk_modifier: altitudeMultiplier,
+  });
 });

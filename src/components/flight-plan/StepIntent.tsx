@@ -1,6 +1,7 @@
 import { useMemo, useState, useRef, useEffect, useCallback } from "react";
 import { MapPin, Loader2 } from "lucide-react";
 import type { FlightPlanData } from "@/pages/FlightPlan";
+import { localDateISO } from "@/lib/time";
 
 interface Props {
   data: FlightPlanData;
@@ -120,7 +121,7 @@ function LocationInput({
           onFocus={() => !confirmed && setOpen(true)}
           placeholder={placeholder}
           autoComplete="off"
-          className={`w-full pl-9 pr-10 py-2.5 rounded-md bg-secondary border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm transition-colors ${
+          className={`w-full pl-9 pr-10 h-11 rounded-lg bg-background/60 border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm transition-colors ${
             confirmed ? "border-primary/50" : "border-border"
           }`}
         />
@@ -132,7 +133,7 @@ function LocationInput({
         )}
 
         {showDropdown && (
-          <div className="absolute z-50 top-full mt-1 w-full bg-card border border-border rounded-lg shadow-xl overflow-hidden">
+          <div className="absolute z-50 top-full mt-1 w-full bg-card border border-border rounded-xl shadow-elev overflow-hidden">
             {loading && results.length === 0 ? (
               <div className="px-4 py-3 text-xs text-muted-foreground font-mono">Searching...</div>
             ) : (
@@ -198,9 +199,9 @@ const StepIntent = ({ data, updateData }: Props) => {
           <input
             type="date"
             value={data.departureDate}
-            min={new Date().toISOString().split("T")[0]}
+            min={localDateISO()}
             onChange={(e) => updateData({ departureDate: e.target.value })}
-            className="w-full px-4 py-2.5 rounded-md bg-secondary border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm font-mono"
+            className="w-full px-4 h-11 rounded-lg bg-background/60 border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm font-mono"
           />
           <p className="text-[11px] text-muted-foreground font-mono">
             Schedule a flight today or any future date.
@@ -213,7 +214,7 @@ const StepIntent = ({ data, updateData }: Props) => {
             type="time"
             value={data.departureWindowStart}
             onChange={(e) => updateData({ departureWindowStart: e.target.value })}
-            className="w-full px-4 py-2.5 rounded-md bg-secondary border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm font-mono"
+            className="w-full px-4 h-11 rounded-lg bg-background/60 border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm font-mono"
           />
         </div>
 
@@ -223,7 +224,7 @@ const StepIntent = ({ data, updateData }: Props) => {
             type="time"
             value={data.departureWindowEnd}
             onChange={(e) => updateData({ departureWindowEnd: e.target.value })}
-            className="w-full px-4 py-2.5 rounded-md bg-secondary border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm font-mono"
+            className="w-full px-4 h-11 rounded-lg bg-background/60 border border-border text-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 text-sm font-mono"
           />
         </div>
       </div>

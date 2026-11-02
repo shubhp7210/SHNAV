@@ -1,39 +1,114 @@
 name: Deploy to Supabase
 
+# Rollback: run this workflow manually with `ref` = the last good commit SHA.
+#   • functions_only = true  → redeploys that version of the edge functions only
+#   • functions_only = false → also runs `db push` (forward-only; to undo a
+#     migration use its script in supabase/rollback/ — see docs/OPERATIONS.md)
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA / tag to deploy (empty = current main)"
+        required: false
+        default: ""
+      functions_only:
+        description: "Redeploy edge functions only (skip migrations)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: supabase-production-deploy
+  cancel-in-progress: false
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
+  test:
+    uses: ./.github/workflows/ci.yml
 
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
       PROJECT_ID: jiagegvlehrawpxcrwsd
-
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Preflight — required secrets
+        env:
+          ALLOWED_ORIGINS: ${{ secrets.ALLOWED_ORIGINS }}
+          INTERNAL_FUNCTION_SECRET: ${{ secrets.INTERNAL_FUNCTION_SECRET }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          missing=""
+          for v in SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD ALLOWED_ORIGINS INTERNAL_FUNCTION_SECRET BACKUP_PASSPHRASE SUPABASE_DB_URL; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          # CORS fails closed: deploying without ALLOWED_ORIGINS would block the live site.
+          [ -z "$missing" ] || { echo "::error::Missing secrets:$missing"; exit 1; }
 
       - uses: supabase/setup-cli@v1
+        with: { version: latest }
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-17
+
+      - name: Pre-deploy backup (rollback point)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          /usr/lib/postgresql/17/bin/pg_dump "$SUPABASE_DB_URL" -Fc --no-owner --no-privileges \
+            --schema=public --schema=app_private -f predeploy.dump
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
+            --symmetric --cipher-algo AES256 -o predeploy.dump.gpg predeploy.dump
+          rm predeploy.dump
+
+      - uses: actions/upload-artifact@v4
         with:
-          version: latest
+          name: predeploy-backup-${{ github.run_id }}
+          path: predeploy.dump.gpg
+          retention-days: 30
 
       - name: Link Supabase project
         run: supabase link --project-ref $PROJECT_ID
 
-      - name: Run database migrations
-        run: supabase db push
-
-      # Per-function verify_jwt is governed by supabase/config.toml ([functions.*]).
-      # Do NOT pass --no-verify-jwt here: that would force gateway JWT off for every
-      # function and override the per-function settings. pattern-learner was removed.
-      - name: Deploy edge functions
-        run: supabase functions deploy airspace-scheduler background-analyzer flight-decision-engine record-flight-outcome route-optimizer trajectory-analysis trajectory-predictor vertiport-coordinator weather-intelligence
-
-      - name: Set INTERNAL_FUNCTION_SECRET
+      - name: Migrations — dry run, then apply
+        if: ${{ !inputs.functions_only }}
         run: |
-          supabase secrets set INTERNAL_FUNCTION_SECRET=${{ secrets.INTERNAL_FUNCTION_SECRET }}
+          supabase db push --dry-run
+          supabase db push
+
+      - name: Function secrets
+        run: |
+          supabase secrets set \
+            ALLOWED_ORIGINS="${{ secrets.ALLOWED_ORIGINS }}" \
+            INTERNAL_FUNCTION_SECRET="${{ secrets.INTERNAL_FUNCTION_SECRET }}"
+
+      # Per-function verify_jwt comes from supabase/config.toml — never pass --no-verify-jwt.
+      - name: Deploy edge functions
+        run: |
+          supabase functions deploy airspace-scheduler background-analyzer flight-decision-engine \
+            record-flight-outcome route-optimizer trajectory-analysis trajectory-predictor \
+            vertiport-coordinator weather-intelligence log-client-error
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      - name: Post-deploy verification (live, read-only)
+        env:
+          SUPABASE_URL: https://jiagegvlehrawpxcrwsd.supabase.co
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          export ALLOWED_ORIGIN="$(echo '${{ secrets.ALLOWED_ORIGINS }}' | cut -d, -f1)"
+          node scripts/verify-production.mjs

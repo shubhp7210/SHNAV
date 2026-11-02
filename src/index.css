@@ -1,57 +1,63 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 /* ─────────────────────────────────────────────────────────────────
-   SHNAV — Design system
-   Deep black canvas · Coral-red brand accent · Aviation precision
+   SHNAV — Design system ("night ops")
+   Navy-black canvas · single coral accent · instrument signal colors
    ───────────────────────────────────────────────────────────────── */
 
 @layer base {
   :root {
-    --background: 0 0% 4%;
-    --foreground: 0 0% 95%;
+    /* Navy-black canvas, cool slate surfaces */
+    --background: 222 30% 5%;
+    --foreground: 210 25% 96%;
 
-    --card: 0 0% 7%;
-    --card-foreground: 0 0% 95%;
+    --card: 222 26% 8%;
+    --card-foreground: 210 25% 96%;
 
-    --popover: 0 0% 6%;
-    --popover-foreground: 0 0% 95%;
+    --popover: 222 26% 8%;
+    --popover-foreground: 210 25% 96%;
 
-    /* Brand coral — matched to logo */
-    --primary: 5 72% 60%;
+    /* Brand coral — single accent (matches BRAND_HEX in src/lib/theme.ts) */
+    --primary: 5 84% 62%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 0 0% 11%;
-    --secondary-foreground: 0 0% 88%;
+    --secondary: 222 20% 12%;
+    --secondary-foreground: 210 20% 90%;
 
-    --muted: 0 0% 10%;
-    --muted-foreground: 0 0% 52%;
+    --muted: 222 20% 11%;
+    --muted-foreground: 218 14% 62%;
 
-    --accent: 5 72% 60%;
+    --accent: 5 84% 62%;
     --accent-foreground: 0 0% 100%;
 
-    --destructive: 0 70% 55%;
+    --destructive: 0 78% 60%;
     --destructive-foreground: 0 0% 98%;
 
-    --border: 0 0% 13%;
-    --input: 0 0% 13%;
-    --ring: 5 72% 60%;
+    /* Instrument signal colors */
+    --signal: 195 85% 62%;   /* data / other traffic (ROUTE_ALT_HEX) */
+    --caution: 39 90% 61%;   /* hold / destination (DEST_HEX) */
+    --success: 152 62% 50%;  /* nominal / go */
 
-    --radius: 0.75rem;
+    --border: 220 18% 15%;
+    --input: 220 18% 15%;
+    --ring: 5 84% 62%;
 
-    --shadow-elev: 0 30px 80px -30px hsl(0 0% 0% / 0.9), 0 8px 24px -8px hsl(0 0% 0% / 0.6);
+    --radius: 0.875rem;
 
-    --sidebar-background: 0 0% 4%;
-    --sidebar-foreground: 0 0% 90%;
-    --sidebar-primary: 5 72% 60%;
+    --shadow-elev: 0 30px 80px -30px hsl(222 60% 2% / 0.9), 0 8px 24px -8px hsl(222 60% 2% / 0.6);
+
+    --sidebar-background: 222 30% 5%;
+    --sidebar-foreground: 210 20% 90%;
+    --sidebar-primary: 5 84% 62%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 0 0% 9%;
-    --sidebar-accent-foreground: 0 0% 96%;
-    --sidebar-border: 0 0% 13%;
-    --sidebar-ring: 5 72% 60%;
+    --sidebar-accent: 222 20% 10%;
+    --sidebar-accent-foreground: 210 25% 96%;
+    --sidebar-border: 220 18% 15%;
+    --sidebar-ring: 5 84% 62%;
   }
 }
 
@@ -66,6 +72,7 @@
     font-feature-settings: "ss01", "cv11";
     -webkit-font-smoothing: antialiased;
     overscroll-behavior-y: none;
+    color-scheme: dark;
     touch-action: manipulation;
   }
 
@@ -85,8 +92,12 @@
 
   ::-webkit-scrollbar { width: 5px; height: 5px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: hsl(0 0% 16%); border-radius: 999px; }
-  ::-webkit-scrollbar-thumb:hover { background: hsl(0 0% 28%); }
+  ::-webkit-scrollbar-thumb { background: hsl(220 16% 18%); border-radius: 999px; }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(220 16% 28%); }
+
+  h1, h2, h3 { font-family: theme("fontFamily.display"); letter-spacing: -0.02em; }
+
+  .tabular { font-variant-numeric: tabular-nums; }
 }
 
 @layer utilities {
@@ -100,30 +111,59 @@
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
-  .glass-card {
-    background: hsl(0 0% 8% / 0.65);
-    backdrop-filter: blur(24px) saturate(150%);
-    -webkit-backdrop-filter: blur(24px) saturate(150%);
-    border: 1px solid hsl(0 0% 100% / 0.06);
+  /* Solid instrument surface — the default card. */
+  .panel {
+    background: linear-gradient(180deg, hsl(222 26% 9%), hsl(222 26% 7.5%));
+    border: 1px solid hsl(var(--border));
+    box-shadow: inset 0 1px 0 hsl(210 40% 98% / 0.04);
+  }
+  /* Recessed well inside a panel (stats, readouts). */
+  .well {
+    background: hsl(222 30% 4.5% / 0.7);
+    border: 1px solid hsl(220 18% 13%);
   }
 
+  .glass-card {
+    background: hsl(222 26% 8% / 0.7);
+    backdrop-filter: blur(24px) saturate(150%);
+    -webkit-backdrop-filter: blur(24px) saturate(150%);
+    border: 1px solid hsl(210 40% 98% / 0.07);
+  }
+
+  /* Floating over a map. */
   .glass-panel {
-    background: hsl(0 0% 6% / 0.8);
-    backdrop-filter: blur(32px) saturate(160%);
-    -webkit-backdrop-filter: blur(32px) saturate(160%);
-    border: 1px solid hsl(0 0% 100% / 0.07);
+    background: hsl(222 30% 6% / 0.78);
+    backdrop-filter: blur(28px) saturate(160%);
+    -webkit-backdrop-filter: blur(28px) saturate(160%);
+    border: 1px solid hsl(210 40% 98% / 0.08);
     box-shadow: var(--shadow-elev);
   }
 
+  /* Tiny uppercase instrument label. */
+  .label-caps {
+    font-family: theme("fontFamily.mono");
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: hsl(var(--muted-foreground));
+  }
+
   .glow-primary {
-    box-shadow: 0 0 48px -12px hsl(5 72% 60% / 0.3);
+    box-shadow: 0 0 48px -12px hsl(var(--primary) / 0.45);
   }
 
   .grid-pattern {
     background-image:
-      linear-gradient(hsl(0 0% 100% / 0.022) 1px, transparent 1px),
-      linear-gradient(90deg, hsl(0 0% 100% / 0.022) 1px, transparent 1px);
-    background-size: 60px 60px;
+      linear-gradient(hsl(210 40% 98% / 0.025) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(210 40% 98% / 0.025) 1px, transparent 1px);
+    background-size: 56px 56px;
+  }
+
+  /* Edge fade for map overlays so text stays legible over bright buildings. */
+  .map-vignette {
+    background:
+      linear-gradient(180deg, hsl(var(--background) / 0.75) 0%, transparent 18%, transparent 72%, hsl(var(--background) / 0.9) 100%),
+      radial-gradient(ellipse at 50% 45%, transparent 55%, hsl(var(--background) / 0.55) 100%);
   }
 
   .animate-fade-in {

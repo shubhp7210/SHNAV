@@ -83,7 +83,7 @@ const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelect
 
   if (routeLoading) {
     return (
-      <div className="mt-6 bg-card/60 backdrop-blur-xl border border-border/50 rounded-xl p-5">
+      <div className="panel rounded-2xl p-5">
         <div className="py-10 flex flex-col items-center gap-4">
           <Loader2 className="w-8 h-8 text-primary animate-spin" />
           <div className="text-center">
@@ -106,7 +106,7 @@ const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelect
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4 }}
-      className="mt-6 bg-card/60 backdrop-blur-xl border border-border/50 rounded-xl p-5 space-y-6"
+      className="panel rounded-2xl p-5 space-y-6"
     >
       {/* ── Section 1: Primary Route ── */}
       <div>
@@ -185,7 +185,7 @@ const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelect
       {/* ── Section 3: Intelligence Panel ── */}
       <div className="grid md:grid-cols-2 gap-4">
         {/* Conflict Summary */}
-        <div className="bg-secondary/50 rounded-lg p-4">
+        <div className="well rounded-lg p-4">
           <p className="text-xs font-mono tracking-widest uppercase text-muted-foreground mb-3">
             Conflict Summary
           </p>
@@ -229,7 +229,7 @@ const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelect
         </div>
 
         {/* Historical Pattern */}
-        <div className="bg-secondary/50 rounded-lg p-4">
+        <div className="well rounded-lg p-4">
           <p className="text-xs font-mono tracking-widest uppercase text-muted-foreground mb-3">
             Historical Pattern
           </p>
@@ -274,36 +274,40 @@ const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelect
             {weather_risk}
           </span>
         </p>
+        {!weather_conditions ? (
+          <p className="text-xs text-caution">Forecast for the departure time was unavailable — weather was not scored as calm.</p>
+        ) : (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="bg-secondary/50 rounded-lg p-3 flex items-center gap-2">
+          <div className="well rounded-lg p-3 flex items-center gap-2">
             <Wind className="w-4 h-4 text-primary shrink-0" />
             <div>
               <p className="text-[10px] text-muted-foreground">Wind</p>
               <p className="text-sm font-mono font-bold">{weather_conditions.wind_speed} km/h</p>
             </div>
           </div>
-          <div className="bg-secondary/50 rounded-lg p-3 flex items-center gap-2">
+          <div className="well rounded-lg p-3 flex items-center gap-2">
             <Wind className="w-4 h-4 text-accent shrink-0" />
             <div>
               <p className="text-[10px] text-muted-foreground">Gusts</p>
               <p className="text-sm font-mono font-bold">{weather_conditions.wind_gusts} km/h</p>
             </div>
           </div>
-          <div className="bg-secondary/50 rounded-lg p-3 flex items-center gap-2">
+          <div className="well rounded-lg p-3 flex items-center gap-2">
             <CloudRain className="w-4 h-4 text-blue-400 shrink-0" />
             <div>
               <p className="text-[10px] text-muted-foreground">Precip</p>
               <p className="text-sm font-mono font-bold">{weather_conditions.precipitation} mm</p>
             </div>
           </div>
-          <div className="bg-secondary/50 rounded-lg p-3 flex items-center gap-2">
+          <div className="well rounded-lg p-3 flex items-center gap-2">
             <Thermometer className="w-4 h-4 text-orange-400 shrink-0" />
             <div>
               <p className="text-[10px] text-muted-foreground">Temp</p>
-              <p className="text-sm font-mono font-bold">{weather_conditions.temperature}°C</p>
+              <p className="text-sm font-mono font-bold">{weather_conditions.temperature != null ? `${weather_conditions.temperature}°C` : "—"}</p>
             </div>
           </div>
         </div>
+        )}
       </div>
 
       {/* Analysis summary footer */}

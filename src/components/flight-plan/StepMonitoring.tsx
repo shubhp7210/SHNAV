@@ -9,8 +9,11 @@ import type { FlightPlanData } from "@/pages/FlightPlan";
 import type { TrajectoryPredictorResult, FutureConflict } from "@/lib/atmTypes";
 import { FlightAudio, haptic } from "@/lib/flightAudio";
 import { supabase } from "@/integrations/supabase/client";
+import { reportClientError } from "@/lib/errorReporter";
 import HudOverlay, { type PovMode } from "@/components/flight-plan/HudOverlay";
 import MapView, { type Pt } from "@/components/MapView";
+import { bandHeight } from "@/lib/geo/region";
+import { densify, locationCoords, plannedRoute, routeLengthKm } from "@/lib/geo/coords";
 import Cockpit from "@/components/flight-plan/Cockpit";
 import type { CameraMode } from "@/lib/cesium/cameraModes";
 
@@ -23,67 +26,10 @@ interface Props {
   updateData: (d: Partial<FlightPlanData>) => void;
 }
 
-// ── Coord helpers ─────────────────────────────────────────────────────────────
-const CITY_COORDS: Record<string, [number, number]> = {
-  "new york": [-73.985, 40.748], "nyc": [-73.985, 40.748],
-  "manhattan": [-73.97, 40.776], "brooklyn": [-73.944, 40.678],
-  "jfk": [-73.779, 40.641],     "laguardia": [-73.872, 40.776],
-  "newark": [-74.175, 40.69],   "hoboken": [-74.031, 40.744],
-  "jersey city": [-74.047, 40.718],
-  "los angeles": [-118.243, 34.052], "chicago": [-87.623, 41.883],
-  "miami": [-80.191, 25.761],   "seattle": [-122.332, 47.606],
-  "boston": [-71.057, 42.361],  "san francisco": [-122.419, 37.774],
-};
-
-function getCoords(loc: string, fb: [number, number]): [number, number] {
-  if (!loc) return fb;
-  const tagged = loc.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (tagged) return [parseFloat(tagged[2]), parseFloat(tagged[1])];
-  const bare = loc.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (bare) return [parseFloat(bare[2]), parseFloat(bare[1])];
-  const key = loc.toLowerCase().trim();
-  for (const [k, v] of Object.entries(CITY_COORDS)) {
-    if (key.includes(k)) return v;
-  }
-  return fb;
-}
-
-// ── Route helpers ─────────────────────────────────────────────────────────────
-function buildRoute(a: [number, number], b: [number, number], n = 160): [number, number][] {
-  const pts: [number, number][] = [];
-  for (let i = 0; i <= n; i++) {
-    const t = i / n;
-    const arc = Math.sin(t * Math.PI) * 0.014;
-    pts.push([a[0] + (b[0] - a[0]) * t + arc * 0.3, a[1] + (b[1] - a[1]) * t + arc]);
-  }
-  return pts;
-}
-
-function getPlannedRoute(data: FlightPlanData): [number, number][] | null {
-  const decisionRouteId = data.atmEngines.flightDecision?.route_id;
-  const matched = decisionRouteId
-    ? data.routeData?.alternate_routes.find((r) => r.id === decisionRouteId)
-    : null;
-  const route = matched ?? data.routeData?.primary_route;
-  if (!route?.waypoints?.length) return null;
-  const pts = route.waypoints
-    .filter((p) => typeof p?.lon === "number" && typeof p?.lat === "number")
-    .map((p) => [p.lon, p.lat] as [number, number]);
-  return pts.length >= 2 ? pts : null;
-}
-
-/** Total great-circle length of a {lat,lng} polyline, in km. */
-function routeLengthKm(pts: Pt[]): number {
-  let km = 0;
-  for (let i = 1; i < pts.length; i++) {
-    const R = 6371, r = Math.PI / 180;
-    const dLat = (pts[i].lat - pts[i - 1].lat) * r;
-    const dLng = (pts[i].lng - pts[i - 1].lng) * r;
-    const h = Math.sin(dLat / 2) ** 2 + Math.cos(pts[i - 1].lat * r) * Math.cos(pts[i].lat * r) * Math.sin(dLng / 2) ** 2;
-    km += 2 * R * Math.asin(Math.sqrt(h));
-  }
-  return km;
-}
+// Fallback endpoints (Midtown → Upper East Side) when a location can't be
+// resolved — only used to keep the simulation running, never written back.
+const FALLBACK_O: Pt = { lat: 40.748, lng: -73.985 };
+const FALLBACK_D: Pt = { lat: 40.795, lng: -73.94 };
 
 function calcBearing(a: [number, number], b: [number, number]): number {
   const r = (d: number) => (d * Math.PI) / 180;
@@ -107,6 +53,10 @@ const StepMonitoring = ({ data, updateData }: Props) => {
   const audioRef      = useRef<FlightAudio | null>(null);
   const lastStatusRef = useRef<"nominal" | "alert">("nominal");
   const waypointsHit  = useRef(new Set<number>());
+  // Where telemetry comes from — only real GPS flights feed the learning loop.
+  const telemetrySourceRef = useRef<"gps" | "sim" | null>(null);
+  const takeoffAtRef = useRef<number | null>(null);
+
 
   // UI state
   const [progress,   setProgress]   = useState(0);
@@ -135,14 +85,15 @@ const StepMonitoring = ({ data, updateData }: Props) => {
 
   const windSpeed = data.atmEngines?.weatherIntel?.origin_weather?.wind_speed ?? null;
 
-  // Planned route as {lat,lng} for the no-WebGL Map3D fallback.
+  // Planned route as {lat,lng}: the decision engine's route, else a straight
+  // densified leg between the filed endpoints.
   const mon3d = useMemo<Pt[]>(() => {
-    const o = getCoords(data.origin, [-73.985, 40.748]);
-    const d = getCoords(data.destination, [-73.94, 40.795]);
-    const pts = getPlannedRoute(data) ?? buildRoute(o, d);
-    return pts.map(([lng, lat]) => ({ lat, lng }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const planned = plannedRoute(data.routeData, data.atmEngines.flightDecision?.route_id);
+    if (planned) return planned;
+    return densify(locationCoords(data.origin) ?? FALLBACK_O, locationCoords(data.destination) ?? FALLBACK_D);
   }, [data.origin, data.destination, data.routeData, data.atmEngines.flightDecision?.route_id]);
+  const corridor = bandHeight(data.altitudeBand);
+  const placeName = (loc: string) => (loc ?? "").replace(/\s*@\s*-?\d+\.?\d*\s*,\s*-?\d+\.?\d*\s*$/, "");
 
   // Stable array identity — progress re-renders this component every frame.
   const monRoutes = useMemo(() => [mon3d], [mon3d]);
@@ -238,7 +189,9 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       else                       { audioRef.current?.playAlertClear(); haptic([60]); }
     };
 
+    takeoffAtRef.current ??= Date.now();
     const onGps = (geo: GeolocationPosition) => {
+      telemetrySourceRef.current = "gps";
       const pos: [number, number] = [geo.coords.longitude, geo.coords.latitude];
       const { idx, m } = nearestIdx(pos);
       setProgress(idx / Math.max(1, pts.length - 1));
@@ -252,6 +205,7 @@ const StepMonitoring = ({ data, updateData }: Props) => {
     };
 
     const startSim = () => {
+      telemetrySourceRef.current = "sim";
       const DURATION = 48_000;
       startTsRef.current = null;
       const tick = (ts: number) => {
@@ -331,35 +285,44 @@ const StepMonitoring = ({ data, updateData }: Props) => {
     if (landedRef.current || progress < 1 || !data.flightIntentId) return;
     landedRef.current = true;
     const intentId = data.flightIntentId;
-    const landedAt = new Date().toISOString();
+    const landedAt = new Date();
     void (async () => {
-      // record-flight-outcome marks the flight landed server-side and feeds
-      // the learning loop (patterns, weights, user error profile).
+      const markLanded = async () => {
+        const { error } = await supabase.from("flight_intents")
+          .update({ status: "landed", landed_at: landedAt.toISOString() }).eq("id", intentId);
+        if (error) reportClientError(new Error(`landed update failed: ${error.message}`), "manual", "warning");
+      };
+      // Only real GPS-tracked flights train the learning loop, with MEASURED
+      // times. A simulated run (48 s replay) is archived but never recorded as
+      // an outcome — it would teach the model fabricated durations.
+      if (telemetrySourceRef.current !== "gps" || takeoffAtRef.current == null) {
+        await markLanded();
+        return;
+      }
       const decision = data.atmEngines.flightDecision;
       const plannedMin = data.routeData?.primary_route?.estimated_time_min ?? null;
+      const actualMin = Math.max(0, (landedAt.getTime() - takeoffAtRef.current) / 60_000);
       const { error } = await supabase.functions.invoke("record-flight-outcome", {
         body: {
           flight_intent_id: intentId,
           aircraft_id: data.aircraftId || "UNKNOWN",
-          route_id: data.routeData?.route_id ?? null,
-          decision_id: decision?.decision_id ?? null,
-          planned_departure_time: decision?.departure_time ?? null,
-          actual_arrival_time: landedAt,
-          planned_duration_minutes: plannedMin,
-          actual_duration_minutes: plannedMin ?? 0,
-          delay_minutes: decision?.delay_minutes ?? 0,
-          predicted_overall_score: data.routeData?.primary_route?.overall_score ?? null,
-          predicted_weather_risk: data.weatherRisk || null,
+          route_id: data.routeData?.route_id ?? undefined,
+          decision_id: decision?.decision_id ?? undefined,
+          planned_departure_time: decision?.departure_time ?? undefined,
+          actual_departure_time: new Date(takeoffAtRef.current).toISOString(),
+          actual_arrival_time: landedAt.toISOString(),
+          planned_duration_minutes: plannedMin ?? undefined,
+          actual_duration_minutes: Math.round(actualMin * 10) / 10,
+          delay_minutes: Math.max(0, decision?.departure_time
+            ? (takeoffAtRef.current - new Date(decision.departure_time).getTime()) / 60_000 : 0),
+          predicted_overall_score: data.routeData?.primary_route?.overall_score ?? undefined,
+          predicted_weather_risk: ["low", "moderate", "high", "unknown"].includes(data.weatherRisk) ? data.weatherRisk : undefined,
           completion_status: "completed",
         },
       });
       if (error) {
-        console.warn("[flight] record-flight-outcome failed, marking landed directly", error.message);
-        const { error: updateErr } = await supabase
-          .from("flight_intents")
-          .update({ status: "landed", landed_at: landedAt })
-          .eq("id", intentId);
-        if (updateErr) console.warn("[flight] landed update failed", updateErr.message);
+        reportClientError(new Error(`record-flight-outcome failed: ${error.message}`), "manual", "warning");
+        await markLanded();
       }
     })();
   }, [progress, data.flightIntentId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -379,53 +342,53 @@ const StepMonitoring = ({ data, updateData }: Props) => {
   // ── Completion screen ─────────────────────────────────────────────────────
   if (completed) {
     const score = data.trajectoryScore ?? 0;
-    const scoreColor = score >= 80 ? "#34d399" : score >= 60 ? "#fbbf24" : "#f87171";
+    const scoreColor = score >= 80 ? "hsl(var(--success))" : score >= 60 ? "hsl(var(--caution))" : "hsl(var(--destructive))";
     return (
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }}
-        className="flex flex-col items-center text-center py-6 gap-6"
+        className="panel rounded-2xl flex flex-col items-center text-center py-12 px-5 gap-6 max-w-2xl mx-auto"
       >
         <motion.div initial={{ scale: 0.6, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
           transition={{ type: "spring", stiffness: 260, damping: 18, delay: 0.1 }}
-          className="relative flex items-center justify-center"
+          className="relative flex items-center justify-center w-20 h-20"
         >
-          <div className="absolute inset-0 rounded-full bg-emerald-400/10 animate-ping" style={{ width: 88, height: 88 }} />
-          <div className="w-20 h-20 rounded-full bg-emerald-400/10 border-2 border-emerald-400/50 flex items-center justify-center">
-            <CheckCircle className="w-9 h-9 text-emerald-400" strokeWidth={1.75} />
-          </div>
+          <span className="absolute inset-0 rounded-full bg-success/10 animate-ping" />
+          <span className="relative w-20 h-20 rounded-full bg-success/10 border-2 border-success/50 flex items-center justify-center">
+            <CheckCircle className="w-9 h-9 text-success" strokeWidth={1.75} />
+          </span>
         </motion.div>
         <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.25 }}>
-          <p className="text-[11px] font-mono tracking-[0.25em] uppercase text-emerald-400 mb-1">Mission Complete</p>
-          <h3 className="text-2xl font-bold">Flight Landed</h3>
-          <p className="text-sm text-muted-foreground mt-1 font-mono">
-            {data.origin || "Origin"} <ArrowRight className="inline w-3.5 h-3.5 text-primary" /> {data.destination || "Destination"}
+          <p className="label-caps text-success mb-2">Mission complete</p>
+          <h3 className="text-3xl font-semibold">Flight landed</h3>
+          <p className="text-sm text-muted-foreground mt-2 font-mono flex items-center justify-center gap-2 flex-wrap">
+            {placeName(data.origin) || "Origin"} <ArrowRight className="inline w-3.5 h-3.5 text-primary" /> {placeName(data.destination) || "Destination"}
           </p>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}
-          className="grid grid-cols-3 gap-3 w-full max-w-sm"
+        <motion.dl initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}
+          className="grid grid-cols-3 gap-3 w-full max-w-md"
         >
           {[
-            { label: "Aircraft",   value: data.aircraftId || "—" },
-            { label: "Traj Score", value: String(score), style: { color: scoreColor } },
-            { label: "Status",     value: "Nominal",     style: { color: "#34d399" } },
+            { label: "Aircraft", value: data.aircraftId || "—" },
+            { label: "Traj score", value: String(score), style: { color: scoreColor } },
+            { label: "Status", value: "Landed", style: { color: "hsl(var(--success))" } },
           ].map(({ label, value, style }) => (
-            <div key={label} className="glass-card rounded-xl px-3 py-3.5">
-              <p className="text-base font-bold font-mono" style={style ?? {}}>{value}</p>
-              <p className="text-[10px] text-muted-foreground mt-0.5">{label}</p>
+            <div key={label} className="well rounded-xl px-3 py-3.5">
+              <dd className="text-base font-bold font-mono truncate tabular" style={style ?? {}}>{value}</dd>
+              <dt className="label-caps mt-1">{label}</dt>
             </div>
           ))}
-        </motion.div>
+        </motion.dl>
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.55 }}
-          className="flex flex-col sm:flex-row gap-3 w-full max-w-sm"
+          className="flex flex-col sm:flex-row gap-3 w-full max-w-md"
         >
-          <button onClick={() => navigate("/")}
-            className="flex-1 flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-primary text-primary-foreground font-semibold text-sm hover:bg-primary/90 transition-colors"
-          >
-            <Home className="w-4 h-4" /> Back to Home
-          </button>
           <button onClick={() => navigate("/dashboard")}
-            className="flex-1 flex items-center justify-center gap-2 px-5 py-3 rounded-xl border border-border text-foreground/70 font-medium text-sm hover:bg-secondary/40 transition-colors"
+            className="flex-1 flex items-center justify-center gap-2 px-5 h-11 rounded-xl bg-primary text-primary-foreground font-semibold text-sm hover:brightness-110 transition"
           >
-            <LayoutDashboard className="w-4 h-4" /> Dashboard
+            <LayoutDashboard className="w-4 h-4" /> Operations
+          </button>
+          <button onClick={() => navigate("/")}
+            className="flex-1 flex items-center justify-center gap-2 px-5 h-11 rounded-xl border border-border text-foreground/80 font-medium text-sm hover:bg-white/5 transition-colors"
+          >
+            <Home className="w-4 h-4" /> Home
           </button>
         </motion.div>
       </motion.div>
@@ -435,16 +398,19 @@ const StepMonitoring = ({ data, updateData }: Props) => {
   // ── Idle screen ───────────────────────────────────────────────────────────
   if (!data.monitoringActive) {
     return (
-      <div className="space-y-6">
-        <p className="text-muted-foreground text-sm">Real-time 3D flight monitoring over the planned route.</p>
-        <div className="py-14 text-center space-y-5">
-          <div className="relative inline-flex items-center justify-center w-16 h-16 mx-auto">
-            <div className="absolute inset-0 rounded-full bg-primary/10 animate-ping" />
-            <Radio className="relative w-8 h-8 text-primary opacity-70" />
+      <div className="panel rounded-2xl grid-pattern overflow-hidden">
+        <div className="py-16 px-5 text-center flex flex-col items-center gap-6">
+          <div className="relative inline-flex items-center justify-center w-20 h-20">
+            <span className="absolute inset-0 rounded-full border border-signal/30 animate-ping" />
+            <span className="absolute inset-2 rounded-full border border-signal/40" />
+            <Radio className="relative w-8 h-8 text-signal" />
           </div>
           <div>
-            <p className="text-foreground font-medium">3D Map — Ready</p>
-            <p className="text-muted-foreground text-sm mt-1">Monitoring activates once the simulation begins.</p>
+            <p className="font-display text-xl font-semibold">3D tracking ready</p>
+            <p className="text-muted-foreground text-sm mt-1.5 max-w-sm">
+              Opens over Manhattan, then follows your aircraft along the cleared route. Live GPS is used when
+              available; otherwise the flight is simulated.
+            </p>
           </div>
           <button
             onClick={() => {
@@ -455,9 +421,9 @@ const StepMonitoring = ({ data, updateData }: Props) => {
               haptic([60, 30, 120]);
               updateData({ monitoringActive: true });
             }}
-            className="px-7 py-3 bg-primary text-primary-foreground rounded-lg font-semibold text-sm hover:bg-primary/90 transition-colors"
+            className="px-7 h-12 bg-primary text-primary-foreground rounded-xl font-semibold text-sm hover:brightness-110 transition shadow-[0_10px_40px_-12px_hsl(var(--primary)/0.7)]"
           >
-            Launch 3D Simulation
+            Launch 3D tracking
           </button>
         </div>
       </div>
@@ -469,128 +435,143 @@ const StepMonitoring = ({ data, updateData }: Props) => {
   const remainingKm = mon3d.length >= 2 ? routeLengthKm(mon3d) * (1 - progress) : null;
 
   return (
-    <div className="space-y-4">
-      {/* Status bar */}
-      <div className={`flex items-center gap-3 p-3 rounded-lg border transition-colors duration-500 ${
-        status === "nominal" ? "border-primary/30 bg-primary/5" : "border-amber-500/50 bg-amber-500/10"
-      }`}>
-        {status === "nominal"
-          ? <CheckCircle className="w-5 h-5 text-primary shrink-0" />
-          : <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 animate-pulse" />}
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold">
-            {status === "nominal" ? "On Track — Nominal" : "Deviation Detected"}
-          </p>
-          <p className="text-xs text-muted-foreground font-mono truncate">
+    <div className="grid lg:grid-cols-[minmax(0,1fr)_340px] gap-4 items-start">
+      <div className="space-y-3 min-w-0">
+        {/* 3D Map */}
+        <div className="relative w-full rounded-2xl overflow-hidden border border-border h-[62vh] min-h-[380px] lg:h-[calc(100dvh-20rem)] lg:min-h-[440px] bg-card">
+          <MapView
+            routes={monRoutes} progress={progress} heading={heading} speedKmh={speedKmh}
+            cameraMode={cameraMode} corridorHeight={corridor}
+            endpointLabels={[placeName(data.origin), placeName(data.destination)]}
+            interactive label="Flight tracking map"
+          />
+          <div className="absolute inset-0 pointer-events-none map-vignette" />
+
+          <HudOverlay
+            heading={heading} speedKmh={speedKmh} windSpeed={windSpeed}
+            povMode={povMode} autoPov={autoPov}
+            onPovChange={(m) => {
+              if (tacTimerRef.current) { clearTimeout(tacTimerRef.current); tacTimerRef.current = null; }
+              changePov(m, true);
+              haptic([15]);
+            }}
+            onToggleAutoPov={() => setAutoPov((v) => !v)}
+            driftClock={driftClock}
+            driftSeverity={status === "alert" ? "moderate" : "low"}
+          />
+
+          <Cockpit
+            heading={heading}
+            speedKmh={speedKmh}
+            progress={progress}
+            status={status}
+            distanceKm={remainingKm}
+            lastUpdateMs={lastTsRef.current}
+            now={nowTick}
+            cameraMode={cameraMode}
+            onMode={(m) => { setCameraMode(m); haptic([15]); }}
+            muted={muted}
+            onToggleMute={() => { const n = !muted; setMuted(n); audioRef.current?.setMuted(n); haptic([15]); }}
+          />
+        </div>
+        {/* Progress */}
+        <div className="h-1 rounded-full bg-secondary overflow-hidden" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="Route progress">
+          <div className="h-full rounded-full bg-gradient-to-r from-primary to-caution transition-[width] duration-300" style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+
+      <aside className="space-y-3 min-w-0">
+        {/* Status */}
+        <div className={`panel rounded-2xl p-4 transition-colors duration-500 ${status === "nominal" ? "" : "border-caution/50 bg-caution/5"}`} aria-live="polite">
+          <div className="flex items-start gap-3">
             {status === "nominal"
-              ? "All trajectory constraints within tolerance"
-              : "Lateral deviation — evaluating corridor"}
-          </p>
-        </div>
-        <div className="text-right shrink-0">
-          <p className="text-[10px] text-muted-foreground uppercase tracking-wide">ETA</p>
-          <p className="text-sm font-mono font-bold text-primary">{eta}s</p>
-        </div>
-      </div>
-
-      {/* Progress */}
-      <div className="h-[3px] rounded-full bg-secondary overflow-hidden">
-        <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${pct}%` }} />
-      </div>
-
-      {/* 3D Map */}
-      <div className="relative w-full rounded-xl overflow-hidden border border-white/10 h-[60vh] min-h-[360px] md:h-[460px]">
-        <MapView
-          routes={monRoutes} progress={progress} heading={heading} speedKmh={speedKmh}
-          cameraMode={cameraMode} interactive color="#FF3157" label="Flight route"
-        />
-
-        <HudOverlay
-          heading={heading} speedKmh={speedKmh} windSpeed={windSpeed}
-          povMode={povMode} autoPov={autoPov}
-          onPovChange={(m) => {
-            if (tacTimerRef.current) { clearTimeout(tacTimerRef.current); tacTimerRef.current = null; }
-            changePov(m, true);
-            haptic([15]);
-          }}
-          onToggleAutoPov={() => setAutoPov((v) => !v)}
-          driftClock={driftClock}
-          driftSeverity={status === "alert" ? "moderate" : "low"}
-        />
-
-        <Cockpit
-          heading={heading}
-          speedKmh={speedKmh}
-          progress={progress}
-          status={status}
-          distanceKm={remainingKm}
-          lastUpdateMs={lastTsRef.current}
-          now={nowTick}
-          cameraMode={cameraMode}
-          onMode={(m) => { setCameraMode(m); haptic([15]); }}
-          muted={muted}
-          onToggleMute={() => { const n = !muted; setMuted(n); audioRef.current?.setMuted(n); haptic([15]); }}
-        />
-      </div>
-
-      {/* Route info */}
-      <div className="grid grid-cols-3 gap-2">
-        {[
-          { label: "FROM",     value: data.origin      || "—", color: "text-primary" },
-          { label: "PROGRESS", value: `${pct}%` },
-          { label: "TO",       value: data.destination || "—" },
-        ].map(({ label, value, color }) => (
-          <div key={label} className="bg-secondary/50 rounded-lg p-3 text-center border border-border/30">
-            <p className={`text-xs font-mono font-bold truncate ${color ?? "text-foreground"}`}>{value}</p>
-            <p className="text-[10px] text-muted-foreground mt-0.5 tracking-wider">{label}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Live trajectory intelligence */}
-      <div className="rounded-xl border border-white/10 bg-black/20 overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/10">
-          <div className="flex items-center gap-2">
-            <Activity className="w-3.5 h-3.5 text-primary" />
-            <span className="text-xs font-semibold text-white/60 uppercase tracking-widest">Live Trajectory</span>
-          </div>
-          <div className="flex items-center gap-3">
-            <Zap className="w-3 h-3 text-primary" />
-            <span className="text-[10px] text-white/40">Flow</span>
-            <span className={`text-[10px] font-bold ${flowEfficiency >= 80 ? "text-emerald-400" : flowEfficiency >= 60 ? "text-amber-400" : "text-red-400"}`}>
-              {flowEfficiency}%
-            </span>
-            <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${liveConflicts.length > 0 ? "bg-red-400" : "bg-emerald-400"}`} />
-          </div>
-        </div>
-        <div className="p-3">
-          {liveConflicts.length === 0 ? (
-            <div className="flex items-center gap-2 text-emerald-400 text-xs">
-              <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full" /> No conflicts in 5-minute horizon
+              ? <CheckCircle className="w-5 h-5 text-success shrink-0 mt-0.5" />
+              : <AlertTriangle className="w-5 h-5 text-caution shrink-0 mt-0.5 animate-pulse" />}
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold">{status === "nominal" ? "On track — nominal" : "Deviation detected"}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {status === "nominal" ? "All trajectory constraints within tolerance" : "Lateral deviation — evaluating corridor"}
+              </p>
             </div>
-          ) : (
-            <div className="space-y-2">
-              {liveConflicts.slice(0, 3).map((c, i) => (
-                <div key={i} className={`flex items-center justify-between p-2 rounded-lg text-xs border ${
-                  c.severity === "high"     ? "border-red-500/30 bg-red-500/5 text-red-300" :
-                  c.severity === "moderate" ? "border-amber-500/30 bg-amber-500/5 text-amber-300" :
-                                              "border-yellow-500/20 bg-yellow-500/5 text-yellow-300"
-                }`}>
-                  <div className="flex items-center gap-2">
-                    <AlertTriangle className="w-3 h-3 shrink-0" />
-                    <span>{c.aircraft_a} ↔ {c.aircraft_b}</span>
-                    <span className="text-white/30">T+{c.t_plus_min}m</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-white/40">
-                    <Navigation className="w-3 h-3" />
-                    <span className="text-[10px] truncate max-w-[120px]">{c.resolution.action}</span>
-                  </div>
-                </div>
-              ))}
+            <div className="text-right shrink-0">
+              <p className="label-caps">ETA</p>
+              <p className="text-lg font-mono font-bold text-primary tabular">{eta}s</p>
             </div>
-          )}
+          </div>
         </div>
-      </div>
+
+        {/* Route */}
+        <div className="panel rounded-2xl p-4 space-y-3">
+          {[
+            { label: "From", value: placeName(data.origin) || "—", dot: "bg-primary" },
+            { label: "To", value: placeName(data.destination) || "—", dot: "bg-caution" },
+          ].map(({ label, value, dot }) => (
+            <div key={label} className="flex items-center gap-3 min-w-0">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
+              <span className="label-caps w-10 shrink-0">{label}</span>
+              <span className="text-sm truncate">{value}</span>
+            </div>
+          ))}
+          <div className="grid grid-cols-3 gap-2 pt-1">
+            {[
+              { label: "Progress", value: `${pct}%` },
+              { label: "Remaining", value: remainingKm != null ? `${remainingKm.toFixed(1)} km` : "—" },
+              { label: "Band", value: (data.altitudeBand || "low").toUpperCase() },
+            ].map(({ label, value }) => (
+              <div key={label} className="well rounded-lg px-2.5 py-2">
+                <p className="label-caps">{label}</p>
+                <p className="text-sm font-mono font-semibold tabular mt-0.5 truncate">{value}</p>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-muted-foreground">Corridor height on the map is a nominal display value for the band.</p>
+        </div>
+
+        {/* Live trajectory intelligence */}
+        <div className="panel rounded-2xl overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+            <div className="flex items-center gap-2">
+              <Activity className="w-3.5 h-3.5 text-signal" />
+              <span className="label-caps text-foreground/75">Live trajectory</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Zap className="w-3 h-3 text-signal" />
+              <span className="text-[10px] text-muted-foreground">Flow</span>
+              <span className={`text-[11px] font-bold tabular ${flowEfficiency >= 80 ? "text-success" : flowEfficiency >= 60 ? "text-caution" : "text-destructive"}`}>
+                {flowEfficiency}%
+              </span>
+              <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${liveConflicts.length > 0 ? "bg-destructive" : "bg-success"}`} />
+            </div>
+          </div>
+          <div className="p-3">
+            {liveConflicts.length === 0 ? (
+              <p className="flex items-center gap-2 text-success text-xs">
+                <span className="w-1.5 h-1.5 bg-success rounded-full" /> No conflicts in 5-minute horizon
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {liveConflicts.slice(0, 3).map((c, i) => (
+                  <li key={i} className={`p-2.5 rounded-lg text-xs border ${
+                    c.severity === "high" ? "border-destructive/40 bg-destructive/5 text-red-300" :
+                    c.severity === "moderate" ? "border-caution/40 bg-caution/5 text-amber-200" :
+                    "border-yellow-500/20 bg-yellow-500/5 text-yellow-200"
+                  }`}>
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="w-3 h-3 shrink-0" />
+                      <span className="truncate">{c.aircraft_a} ↔ {c.aircraft_b}</span>
+                      <span className="text-muted-foreground ml-auto shrink-0">T+{c.t_plus_min}m</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 text-muted-foreground mt-1">
+                      <Navigation className="w-3 h-3 shrink-0" />
+                      <span className="text-[11px] truncate">{c.resolution.action}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </aside>
     </div>
   );
 };

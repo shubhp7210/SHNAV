@@ -1,29 +1,26 @@
-// Single source of truth for location → (lat, lon) resolution across edge
-// functions. Replaces four divergent city tables that previously caused the
-// same input string to resolve differently in different functions.
+// Location → coordinates for every edge function.
 //
 // Resolution order:
-//   1. Tagged coord form "name @ lat,lon" or bare "lat,lon"
-//   2. Known-city table (substring match)
-//   3. Nominatim (OpenStreetMap) reverse-fallback
-//   4. DEFAULT_COORDS (NYC)
-import { DEFAULT_COORDS } from "./constants.ts";
+//   1. Tagged "name @ lat,lon" or bare "lat,lon" (what the location search sends)
+//   2. Known-place table
+//   3. geocode_cache (DB) — positive results kept, negative results for 1 day
+//   4. Nominatim, throttled to ≤1 request/second per OSM's usage policy
+// Unresolvable input returns NULL. The old code silently returned New York,
+// which placed unknown flights in Manhattan for conflict and weather checks.
+import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import type { LatLon } from "./geo.ts";
+import { countCall } from "./log.ts";
 
-// Merged from the four prior tables (route-optimizer / trajectory-analysis /
-// trajectory-predictor / weather-intelligence). Exact input matches win first;
-// keys of 3+ chars are then matched on word boundaries. Two-letter aliases
-// ("la", "sf") only match exactly — substring matching made "Orlando" resolve
-// to Los Angeles.
+export interface Resolved { lat: number; lon: number; source: "tagged" | "table" | "cache" | "nominatim" }
+
 const CITY_COORDS: Record<string, LatLon> = {
-  // North America
   "new york":      [40.7128,  -74.006],
   "nyc":           [40.7128,  -74.006],
-  "manhattan":     [40.776,   -73.97],
+  "manhattan":     [40.7831,  -73.9712],
   "brooklyn":      [40.678,   -73.944],
-  "jfk":           [40.641,   -73.779],
-  "laguardia":     [40.776,   -73.872],
-  "newark":        [40.69,    -74.175],
+  "jfk":           [40.6413,  -73.7781],
+  "laguardia":     [40.7769,  -73.874],
+  "newark":        [40.6895,  -74.1745],
   "boston":        [42.361,   -71.057],
   "chicago":       [41.883,   -87.623],
   "los angeles":   [34.0522, -118.2437],
@@ -35,71 +32,85 @@ const CITY_COORDS: Record<string, LatLon> = {
   "dallas":        [32.7767,  -96.797],
   "atlanta":       [33.749,   -84.388],
   "denver":        [39.7392, -104.9903],
-  // Two-letter aliases — exact-match only (see getCoords).
   "la":            [34.0522, -118.2437],
   "sf":            [37.7749, -122.4194],
-  // International
-  "london":        [51.5074,   -0.1278],
-  "paris":         [48.864,     2.349],
-  "dubai":         [25.2048,   55.2708],
-  "tokyo":         [35.6762,  139.6503],
-  "singapore":     [ 1.3521,  103.8198],
 };
 
-/** Parse "name @ lat,lon" or bare "lat,lon" forms. */
 export function parseTaggedCoords(location: string): LatLon | null {
-  const tagged = location.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (tagged) {
-    const lat = parseFloat(tagged[1]);
-    const lon = parseFloat(tagged[2]);
-    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
-  }
-  const bare = location.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-  if (bare) {
-    const lat = parseFloat(bare[1]);
-    const lon = parseFloat(bare[2]);
-    if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
-  }
-  return null;
+  const m = location.match(/@\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/) ??
+    location.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
+  if (!m) return null;
+  const lat = parseFloat(m[1]), lon = parseFloat(m[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return [lat, lon];
 }
 
-/** Resolve a free-text location to (lat, lon). Async because of the Nominatim
- *  fallback; the local lookups all return synchronously. */
-export async function getCoords(location: string): Promise<LatLon> {
-  if (!location?.trim()) return [...DEFAULT_COORDS] as LatLon;
+/** Synchronous lookups only (tag + known places). */
+export function resolveLocal(location: string | null | undefined): Resolved | null {
+  if (!location?.trim()) return null;
+  const tagged = parseTaggedCoords(location);
+  if (tagged) return { lat: tagged[0], lon: tagged[1], source: "tagged" };
+  // Only a bare place name ("Boston", "Boston, MA") uses the table. Word
+  // matching inside longer text snapped addresses to city centroids — e.g.
+  // "Downtown Manhattan Heliport, New York" landed 9 km away in Central Park.
+  const key = location.toLowerCase().split(",")[0].trim();
+  const hit = CITY_COORDS[key];
+  return hit ? { lat: hit[0], lon: hit[1], source: "table" } : null;
+}
 
-  const parsed = parseTaggedCoords(location);
-  if (parsed) return parsed;
+// Per-isolate serialisation so concurrent requests never exceed 1 req/s.
+let nominatimChain: Promise<unknown> = Promise.resolve();
+let lastNominatimAt = 0;
+function throttledNominatim(q: string): Promise<Response> {
+  const run = async () => {
+    const wait = lastNominatimAt + 1100 - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    lastNominatimAt = Date.now();
+    countCall("nominatim");
+    return fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`, {
+      headers: { "User-Agent": "SHNAV-ATM/1.0 (flight planning; contact via app)", "Accept-Language": "en" },
+      signal: AbortSignal.timeout(6000),
+    });
+  };
+  const p = nominatimChain.then(run, run);
+  nominatimChain = p.catch(() => undefined);
+  return p;
+}
 
-  const key = location.toLowerCase().trim();
-  if (CITY_COORDS[key]) return CITY_COORDS[key];
-  // Word-boundary match, longest key first so "los angeles" wins over "jfk".
-  // Short aliases (<3 chars) are exact-match only, handled above.
-  const keys = Object.keys(CITY_COORDS)
-    .filter((k) => k.length >= 3)
-    .sort((a, b) => b.length - a.length);
-  for (const k of keys) {
-    if (new RegExp(`(^|[^a-z])${k}([^a-z]|$)`).test(key)) return CITY_COORDS[k];
-  }
+export async function resolveLocation(admin: SupabaseClient | null, location: string | null | undefined): Promise<Resolved | null> {
+  const local = resolveLocal(location);
+  if (local || !location?.trim()) return local;
+  const norm = location.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 300);
 
-  try {
-    const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(location)}`,
-      { headers: { "User-Agent": "Altos-ATM/1.0", "Accept-Language": "en" } },
-    );
-    const arr = await res.json();
-    if (Array.isArray(arr) && arr[0]?.lat && arr[0]?.lon) {
-      return [parseFloat(arr[0].lat), parseFloat(arr[0].lon)];
+  if (admin) {
+    const { data } = await admin.from("geocode_cache").select("lat, lon, resolved_at").eq("query_norm", norm).maybeSingle();
+    if (data) {
+      if (data.lat != null && data.lon != null) return { lat: data.lat, lon: data.lon, source: "cache" };
+      if (Date.now() - new Date(data.resolved_at).getTime() < 86_400_000) return null; // recent negative
     }
-  } catch (error) {
-    console.error("[geocode] Nominatim lookup failed:", error);
   }
 
-  return [...DEFAULT_COORDS] as LatLon;
-}
-
-/** Object-shaped variant for callers that prefer `{lat, lon}` over a tuple. */
-export async function getCoordsObj(location: string): Promise<{ lat: number; lon: number }> {
-  const [lat, lon] = await getCoords(location);
-  return { lat, lon };
+  let result: Resolved | null = null;
+  try {
+    const res = await throttledNominatim(location);
+    if (res.ok) {
+      const arr = await res.json();
+      if (Array.isArray(arr) && arr[0]?.lat && arr[0]?.lon) {
+        result = { lat: parseFloat(arr[0].lat), lon: parseFloat(arr[0].lon), source: "nominatim" };
+      }
+    } else {
+      console.error(JSON.stringify({ level: "warning", fn: "geocode", msg: `Nominatim HTTP ${res.status}` }));
+      return null; // do not cache transient failures
+    }
+  } catch (e) {
+    console.error(JSON.stringify({ level: "warning", fn: "geocode", msg: String(e) }));
+    return null;
+  }
+  if (admin) {
+    await admin.from("geocode_cache").upsert({
+      query_norm: norm, lat: result?.lat ?? null, lon: result?.lon ?? null,
+      source: "nominatim", resolved_at: new Date().toISOString(),
+    });
+  }
+  return result;
 }

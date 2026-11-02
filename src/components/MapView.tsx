@@ -1,9 +1,10 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { hasWebGL } from "@/lib/webgl";
-import Map3D, { type Pt } from "@/components/Map3D";
+import Map3D from "@/components/Map3D";
+import type { Pt, TargetView } from "@/lib/geo/region";
+import type { FrameRequest } from "@/components/CesiumMap";
 import MapLoading from "@/components/MapLoading";
 import type { CameraMode } from "@/lib/cesium/cameraModes";
-import type { InitialView } from "@/lib/cesium/engine";
 
 // Cesium is a multi-MB chunk: load it only when a WebGL map is actually about
 // to be shown, never on the critical path of a page.
@@ -18,13 +19,21 @@ export interface MapViewProps {
   heading?: number;
   speedKmh?: number;
   cameraMode?: CameraMode;
-  /** Fixed starting camera (Cesium). Routes are not auto-framed when set. */
-  initialView?: InitialView;
-  /** Canvas-only: loop the demo aircraft along routes (ambient views). */
+  /** Starting camera. Defaults to Manhattan; routes are never auto-framed. */
+  initialView?: TargetView;
+  /** Draw routes[0] as a raised corridor at this display height (m). */
+  corridorHeight?: number;
+  /** Fly to fit routes when `key` changes (Cesium). */
+  frame?: FrameRequest;
+  /** Labels for routes[0] origin/destination (Cesium). */
+  endpointLabels?: [string, string];
+  /** Loop clearly-simulated aircraft along routes (ambient views only). */
   animate?: boolean;
-  /** Canvas-only: slow auto-rotate. */
+  /** Slow cinematic orbit / auto-rotate until the user interacts. */
   rotate?: boolean;
   interactive?: boolean;
+  /** false = mouse wheel scrolls the page instead of zooming the map. */
+  wheelZoom?: boolean;
   color?: string;
   label?: string;
   onReady?: (info: { geoDataLoaded: boolean; warnings: string[] }) => void;
@@ -47,7 +56,7 @@ function useNearViewport(ref: React.RefObject<HTMLElement>, margin = "300px"): b
 }
 
 export default function MapView(props: MapViewProps) {
-  const { animate, rotate, onReady, ...shared } = props;
+  const { animate, rotate, onReady, wheelZoom, ...shared } = props;
   const [webgl] = useState(() => hasWebGL());
   const hostRef = useRef<HTMLDivElement>(null);
   const near = useNearViewport(hostRef);
@@ -70,7 +79,7 @@ export default function MapView(props: MapViewProps) {
     <div ref={hostRef} style={{ position: "absolute", inset: 0 }}>
       {near ? (
         <Suspense fallback={<MapLoading />}>
-          <CesiumMap {...shared} onReady={onReady} />
+          <CesiumMap {...shared} wheelZoom={wheelZoom} simulate={animate} orbit={rotate} onReady={onReady} />
         </Suspense>
       ) : (
         <MapLoading />
@@ -79,4 +88,4 @@ export default function MapView(props: MapViewProps) {
   );
 }
 
-export type { Pt };
+export type { Pt, FrameRequest };

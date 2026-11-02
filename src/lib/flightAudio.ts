@@ -28,7 +28,7 @@ export class FlightAudio {
   // ── Init (must be called from a user-gesture handler) ──────────────────────
   init() {
     if (this.ctx) return;
-    this.ctx    = new (window.AudioContext || (window as any).webkitAudioContext)();
+    this.ctx    = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
     this.master = this.ctx.createGain();
     this.master.gain.value = 0.8;
     this.master.connect(this.ctx.destination);
@@ -134,7 +134,7 @@ export class FlightAudio {
       g.gain.setTargetAtTime(0, now, fadeDuration / 5);
     });
     const stop = (n: AudioNode | null) => {
-      try { (n as any)?.stop?.(now + fadeDuration + 0.1); } catch {}
+      try { (n as AudioScheduledSourceNode | null)?.stop?.(now + fadeDuration + 0.1); } catch { /* already stopped */ }
     };
     setTimeout(() => {
       [this.droneOsc1, this.droneOsc2, this.droneOsc3, this.droneLfo, this.windSrc].forEach(stop);
@@ -272,7 +272,7 @@ export class FlightAudio {
   destroy() {
     this.stopAmbient(0.3);
     setTimeout(() => {
-      try { this.ctx?.close(); } catch {}
+      try { this.ctx?.close(); } catch { /* already closed */ }
       this.ctx = null; this.master = null;
     }, 500);
   }

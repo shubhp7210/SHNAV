@@ -62,7 +62,7 @@ export default function ResetPassword() {
   };
 
   return (
-    <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4 relative overflow-hidden">
+    <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4 relative isolate overflow-hidden">
       <div className="absolute inset-0 -z-10 grid-pattern opacity-30 pointer-events-none" />
 
       <motion.div initial={{ opacity: 0, y: -16 }} animate={{ opacity: 1, y: 0 }} className="mb-10">
@@ -81,7 +81,7 @@ export default function ResetPassword() {
         </div>
 
         {linkError ? (
-          <div className="glass-card rounded-2xl p-6 space-y-4">
+          <div className="panel rounded-2xl p-6 shadow-elev space-y-4">
             <p className="text-sm text-destructive">{linkError}</p>
             <button
               onClick={() => navigate("/auth", { replace: true })}
@@ -91,7 +91,7 @@ export default function ResetPassword() {
             </button>
           </div>
         ) : (
-          <form onSubmit={handleSubmit} className="glass-card rounded-2xl p-6 space-y-4">
+          <form onSubmit={handleSubmit} className="panel rounded-2xl p-6 shadow-elev space-y-4">
             <div>
               <label className="text-[11px] font-mono text-muted-foreground mb-1.5 block tracking-widest uppercase">New Password</label>
               <div className="relative">
@@ -103,7 +103,7 @@ export default function ResetPassword() {
                   required
                   placeholder="Min. 6 characters"
                   minLength={6}
-                  className="w-full bg-secondary border border-border rounded-lg pl-9 pr-10 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  className="w-full bg-background/60 border border-border rounded-lg pl-9 pr-10 h-11 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                 />
                 <button type="button" onClick={() => setShowPw((p) => !p)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
                   {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
@@ -122,7 +122,7 @@ export default function ResetPassword() {
                   required
                   placeholder="Repeat new password"
                   minLength={6}
-                  className="w-full bg-secondary border border-border rounded-lg pl-9 pr-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                  className="w-full bg-background/60 border border-border rounded-lg pl-9 pr-3 h-11 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                 />
               </div>
             </div>

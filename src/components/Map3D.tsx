@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef } from "react";
 
 // A WebGL-free 3D route visualization drawn on a 2D canvas. Used as the fallback
-// when the browser can't create a WebGL context (maplibre needs WebGL). It fetches
+// when the browser can't create a WebGL context (Cesium needs WebGL). It is
+// centered on Manhattan (the hard-coded default) and scaled so every route point
+// stays at its true position relative to that center. It fetches
 // real Esri World Imagery satellite tiles for the route area, tilts them into
 // perspective, and flies the route/aircraft above. No WebGL, no Google.
 
-export interface Pt { lat: number; lng: number }
+import { MANHATTAN, type Pt } from "@/lib/geo/region";
+export type { Pt };
 
 interface Props {
   routes: Pt[][];
@@ -33,16 +36,15 @@ const lat2tile = (lat: number, z: number) => {
 
 interface Geo { clat: number; clng: number; cosLat: number; scale: number }
 
-function computeGeo(routes: Pt[][]): Geo | null {
-  const all = routes.flat();
-  if (all.length === 0) return null;
-  const clat = all.reduce((s, p) => s + p.lat, 0) / all.length;
-  const clng = all.reduce((s, p) => s + p.lng, 0) / all.length;
+// Minimum half-extent (deg) around Manhattan — roughly the island plus rivers.
+const MIN_EXTENT_DEG = 0.06;
+
+function computeGeo(routes: Pt[][]): Geo {
+  const clat = MANHATTAN.lat, clng = MANHATTAN.lng;
   const cosLat = Math.cos(clat * DEG);
-  let max = 0;
-  for (const p of all) max = Math.max(max, Math.abs((p.lng - clng) * cosLat), Math.abs(p.lat - clat));
-  const scale = max > 1e-9 ? 0.95 / max : 4000;
-  return { clat, clng, cosLat, scale };
+  let max = MIN_EXTENT_DEG;
+  for (const p of routes.flat()) max = Math.max(max, Math.abs((p.lng - clng) * cosLat), Math.abs(p.lat - clat));
+  return { clat, clng, cosLat, scale: 0.95 / max };
 }
 
 const toLocal = (g: Geo, lat: number, lng: number): [number, number] =>
@@ -92,7 +94,7 @@ interface MapTex { canvas: HTMLCanvasElement; originPxX: number; originPxY: numb
 
 export default function Map3D({
   routes, progress, animate = false, durationSec = 16, rotate = false,
-  interactive = false, color = "#e05644", className, style, label,
+  interactive = false, color = "#EF5A4C", className, style, label,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const yawRef = useRef(-0.6);
@@ -102,19 +104,15 @@ export default function Map3D({
   const texRef = useRef<MapTex | null>(null);
 
   const geo = useMemo(() => computeGeo(routes), [routes]);
-  const polys = useMemo(
-    () => (geo ? routes.map((r) => r.map((p) => toLocal(geo, p.lat, p.lng))) : []),
-    [routes, geo],
-  );
+  const polys = useMemo(() => routes.map((r) => r.map((p) => toLocal(geo, p.lat, p.lng))), [routes, geo]);
   // `routes` is usually a fresh array each render, so depend on a STABLE content
   // key; otherwise the tile effect resets each render and tiles never finish.
   const geoRef = useRef(geo); geoRef.current = geo;
   const polyRef = useRef(polys); polyRef.current = polys;
-  const geoKey = geo ? `${geo.clat.toFixed(4)}|${geo.clng.toFixed(4)}|${geo.scale.toFixed(3)}` : "";
+  const geoKey = `${geo.scale.toFixed(3)}`;
 
   useEffect(() => {
     const geo = geoRef.current;
-    if (!geo) return;
     texRef.current = null;
     const corners = [toGeo(geo, -G, -G), toGeo(geo, G, -G), toGeo(geo, -G, G), toGeo(geo, G, G)];
     const minLng = Math.min(...corners.map((c) => c.lng));
@@ -203,7 +201,7 @@ export default function Map3D({
     const drawMap = (yaw: number) => {
       const tex = texRef.current;
       const geo = geoRef.current;
-      if (!geo || !tex || !tex.ready) { drawGrid(yaw); return; }
+      if (!tex || !tex.ready) { drawGrid(yaw); return; }
       const src = (x: number, zc: number) => {
         const gg = toGeo(geo, x, zc);
         return { u: lon2tile(gg.lng, tex.z) * TILE - tex.originPxX, v: lat2tile(gg.lat, tex.z) * TILE - tex.originPxY };
@@ -227,7 +225,7 @@ export default function Map3D({
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, w, h);
       const sky = ctx.createLinearGradient(0, 0, 0, h);
-      sky.addColorStop(0, "#0a1430"); sky.addColorStop(0.55, "#0a0f1e"); sky.addColorStop(1, "#070b14");
+      sky.addColorStop(0, "#0d1626"); sky.addColorStop(0.55, "#090d16"); sky.addColorStop(1, "#06080d");
       ctx.fillStyle = sky; ctx.fillRect(0, 0, w, h);
 
       drawMap(yaw);
@@ -303,7 +301,7 @@ export default function Map3D({
       ref={canvasRef}
       aria-label={label ?? "3D route map"}
       className={className}
-      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", display: "block", touchAction: "none", ...style }}
+      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", display: "block", touchAction: interactive ? "none" : "auto", ...style }}
     />
   );
 }

@@ -5,12 +5,14 @@
 // Weather Intelligence
 export interface WeatherAtLocation {
   wind_speed: number;
+  wind_direction_deg?: number;
   wind_gusts: number;
   precipitation: number;
-  temperature: number;
+  /** null when the forecast slot lacks the value — never shown as 0. */
+  temperature: number | null;
   weather_code: number;
   weather_description: string;
-  visibility_m: number;
+  visibility_m: number | null;
   risk_score: number;
   risk_level: "low" | "moderate" | "high";
   micro_effects?: string[];
@@ -22,8 +24,12 @@ export interface WeatherForecastPoint {
 }
 
 export interface WeatherIntelligenceResult {
+  data_status?: "live";
+  source?: string;
+  /** Forecast slot (UTC) the origin values are valid for — the departure time. */
+  valid_at?: string;
   origin_weather: WeatherAtLocation;
-  destination_weather: Omit<WeatherAtLocation, "visibility_m" | "temperature" | "micro_effects">;
+  destination_weather: (Omit<WeatherAtLocation, "visibility_m" | "temperature" | "micro_effects"> & { valid_at?: string }) | null;
   forecast: {
     t_plus_15: WeatherForecastPoint;
     t_plus_30: WeatherForecastPoint;
@@ -49,6 +55,7 @@ export interface AirspaceScheduleResult {
   is_congested: boolean;
   reason: string;
   competing_flights: number;
+  capacity_model?: string;
 }
 
 // Vertiport Coordination
@@ -61,6 +68,10 @@ export interface VertiportInfo {
   max_arrivals_per_hour?: number;
   load_pct: number;
   capacity_ok: boolean;
+  /** false = no registered vertiport within 3 km — capacity not checked. */
+  checked?: boolean;
+  faa_id?: string | null;
+  distance_km?: number;
 }
 
 export interface VertiportStatusResult {
@@ -72,7 +83,9 @@ export interface VertiportStatusResult {
   adjusted_departure_time: string;
   estimated_arrival_time: string;
   flight_time_minutes: number;
-  distance_km: number;
+  distance_km: number | null;
+  reserved?: boolean;
+  capacity_source?: string;
   reason: string;
 }
 
@@ -139,14 +152,16 @@ export interface FlightDecisionResult {
   delay_minutes: number;
   route_id: string | null;
   simulation: SimulationResult;
+  /** Inputs the engine could not assess (stated in the reason too). */
+  data_quality?: string[];
   inputs_summary: {
     trajectory_score: number;
     weather_risk: string;
-    weather_risk_score: number;
+    weather_risk_score: number | null;
     conflicts: number;
-    airspace_load: number;
-    vertiport_delay: number;
-    route_score: number;
+    airspace_load: number | null;
+    vertiport_delay: number | null;
+    route_score: number | null;
     forecast_trend: string;
   };
 }
