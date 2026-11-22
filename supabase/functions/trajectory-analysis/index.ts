@@ -15,6 +15,7 @@ import { resolveLocation } from "../_shared/geocode.ts";
 import { readBody, validateFields } from "../_shared/validate.ts";
 import { parseDepartureWindow, epochMinutes } from "../_shared/departure.ts";
 import { checkNetwork, type ConflictResult } from "../_shared/conflicts.ts";
+import { evaluateExternal, externalPenalty, loadExternal } from "../_shared/external.ts";
 import { loadTraffic, trackFromRow } from "../_shared/traffic.ts";
 import { fetchWeather, computeRisk, riskLevel } from "../_shared/weather.ts";
 import { EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
@@ -107,6 +108,15 @@ serve("trajectory-analysis", async ({ req, admin, json, cors, setUser }) => {
     severity: c.severity,
   }));
 
+  // ── Real external airspace data (FAA TFRs, SIGMET/AIRMET/NWS, live ADS-B) ─
+  const directKm = o && d
+    ? 2 * 6371 * Math.asin(Math.sqrt(Math.sin(((d.lat - o.lat) * Math.PI) / 360) ** 2 +
+        Math.cos((o.lat * Math.PI) / 180) * Math.cos((d.lat * Math.PI) / 180) * Math.sin(((d.lon - o.lon) * Math.PI) / 360) ** 2))
+    : 0;
+  const flightEndMs = end.getTime() + (directKm / EVTOL_BASE_SPEED_KMH) * 3_600_000;
+  const external = evaluateExternal(o && d ? [o, d] : [], body.altitude_band ?? "low", start.getTime(), flightEndMs,
+    await loadExternal(admin, start.getTime(), flightEndMs));
+
   // ── Weather at departure ─────────────────────────────────────────────────
   const wx = o ? await fetchWeather(o.lat, o.lon, start) : null;
   const wxRisk = wx?.available ? riskLevel(computeRisk(wx.windSpeedKmh, wx.windGustsKmh, wx.precipitationMm, wx.weatherCode)) : "unknown";
@@ -116,7 +126,9 @@ serve("trajectory-analysis", async ({ req, admin, json, cors, setUser }) => {
   for (const c of conflicts) score -= c.severity === "high" ? 20 : c.severity === "moderate" ? 10 : 5;
   if (wxRisk === "high") score -= 25; else if (wxRisk === "moderate") score -= 12; else if (wxRisk === "unknown") score -= 8;
   if (check.status === "incomplete") score -= 10;
-  if (conflicts.length === 0 && wxRisk === "low" && check.status === "checked_clear") score += 15;
+  score -= externalPenalty(external);
+  if (conflicts.length === 0 && wxRisk === "low" && check.status === "checked_clear" &&
+      external.restrictions.length === 0 && external.advisories.every((a) => a.severity === "low")) score += 15;
   score = Math.max(10, Math.min(100, score));
 
   const distanceKm = o && d
@@ -134,6 +146,11 @@ serve("trajectory-analysis", async ({ req, admin, json, cors, setUser }) => {
       generated_at: new Date().toISOString(),
     },
     trajectory_score: score,
+    // Direct O→D path vs real data; each optimizer candidate is re-checked in route-optimizer.
+    airspace_restrictions: external.restrictions,
+    weather_advisories: external.advisories,
+    live_traffic: external.live_traffic,
+    external_data: external.data_status,
     weather_risk: wxRisk,
     weather_details: wx?.available
       ? { valid_at: wx.validAt, temperature: wx.temperatureC, wind_speed: wx.windSpeedKmh, wind_gusts: wx.windGustsKmh,

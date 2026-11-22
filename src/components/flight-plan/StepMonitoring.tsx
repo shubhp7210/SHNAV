@@ -15,6 +15,7 @@ import MapView, { type Pt } from "@/components/MapView";
 import { bandHeight } from "@/lib/geo/region";
 import { densify, locationCoords, plannedRoute, routeLengthKm } from "@/lib/geo/coords";
 import Cockpit from "@/components/flight-plan/Cockpit";
+import { useLiveAirspace } from "@/lib/useLiveAirspace";
 import type { CameraMode } from "@/lib/cesium/cameraModes";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -56,6 +57,28 @@ const StepMonitoring = ({ data, updateData }: Props) => {
   // Where telemetry comes from — only real GPS flights feed the learning loop.
   const telemetrySourceRef = useRef<"gps" | "sim" | null>(null);
   const takeoffAtRef = useRef<number | null>(null);
+  // Real TFR outlines + live ADS-B around the tracked flight (same stored data as Step 2).
+  const live = useLiveAirspace(!!data.monitoringActive);
+  // Real GPS fixes, batched to the server (flight-telemetry). Only server-held
+  // telemetry can make a past flight "verified"; simulated runs send nothing.
+  type Fix = { t: string; lat: number; lon: number; acc: number | null; spd: number | null; hdg: number | null; alt: number | null };
+  const fixBufRef = useRef<Fix[]>([]);
+  const flushingRef = useRef(false);
+  const lastFixMsRef = useRef(0);
+  const flushTelemetry = async () => {
+    const id = data.flightIntentId;
+    if (!id || flushingRef.current || fixBufRef.current.length === 0) return;
+    flushingRef.current = true;
+    const batch = fixBufRef.current.slice(0, 120);
+    try {
+      const { error } = await supabase.functions.invoke("flight-telemetry", { body: { flight_intent_id: id, points: batch } });
+      // Keep the batch on failure (e.g. the in_air update has not landed yet) — bounded buffer.
+      if (!error) fixBufRef.current = fixBufRef.current.slice(batch.length);
+      else if (fixBufRef.current.length > 600) fixBufRef.current = fixBufRef.current.slice(-600);
+    } finally {
+      flushingRef.current = false;
+    }
+  };
 
 
   // UI state
@@ -192,6 +215,15 @@ const StepMonitoring = ({ data, updateData }: Props) => {
     takeoffAtRef.current ??= Date.now();
     const onGps = (geo: GeolocationPosition) => {
       telemetrySourceRef.current = "gps";
+      // ≥1 s apart; the server rejects implausible jumps and future timestamps.
+      if (geo.timestamp - lastFixMsRef.current >= 1000) {
+        lastFixMsRef.current = geo.timestamp;
+        fixBufRef.current.push({
+          t: new Date(geo.timestamp).toISOString(), lat: geo.coords.latitude, lon: geo.coords.longitude,
+          acc: geo.coords.accuracy ?? null, spd: geo.coords.speed ?? null, hdg: geo.coords.heading ?? null, alt: geo.coords.altitude ?? null,
+        });
+        if (fixBufRef.current.length >= 20) void flushTelemetry();
+      }
       const pos: [number, number] = [geo.coords.longitude, geo.coords.latitude];
       const { idx, m } = nearestIdx(pos);
       setProgress(idx / Math.max(1, pts.length - 1));
@@ -257,7 +289,11 @@ const StepMonitoring = ({ data, updateData }: Props) => {
       startSim();
     }
 
+    const flushTimer = setInterval(() => { void flushTelemetry(); }, 10_000);
+
     return () => {
+      clearInterval(flushTimer);
+      void flushTelemetry();
       if (animRef.current) { cancelAnimationFrame(animRef.current); animRef.current = null; }
       if (watchId !== null) navigator.geolocation.clearWatch(watchId);
       startTsRef.current = null;
@@ -299,6 +335,9 @@ const StepMonitoring = ({ data, updateData }: Props) => {
         await markLanded();
         return;
       }
+      // Send the GPS tail before reporting the landing (the server waits 2 min
+      // after landing before confirming the end of the flight).
+      await flushTelemetry();
       const decision = data.atmEngines.flightDecision;
       const plannedMin = data.routeData?.primary_route?.estimated_time_min ?? null;
       const actualMin = Math.max(0, (landedAt.getTime() - takeoffAtRef.current) / 60_000);
@@ -441,7 +480,7 @@ const StepMonitoring = ({ data, updateData }: Props) => {
         <div className="relative w-full rounded-2xl overflow-hidden border border-border h-[62vh] min-h-[380px] lg:h-[calc(100dvh-20rem)] lg:min-h-[440px] bg-card">
           <MapView
             routes={monRoutes} progress={progress} heading={heading} speedKmh={speedKmh}
-            cameraMode={cameraMode} corridorHeight={corridor}
+            cameraMode={cameraMode} corridorHeight={corridor} overlays={live.overlays}
             endpointLabels={[placeName(data.origin), placeName(data.destination)]}
             interactive label="Flight tracking map"
           />

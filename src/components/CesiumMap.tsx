@@ -22,7 +22,16 @@ export interface FrameRequest {
   view?: TargetView;
 }
 
+/** Real external data drawn over the map (FAA TFR outlines, live ADS-B). */
+export interface MapOverlays {
+  zones: { id: string; label: string; rings: Pt[][] }[];
+  aircraft: { id: string; label: string; lat: number; lng: number; altM: number | null }[];
+}
+const overlaysKey = (o?: MapOverlays) =>
+  o ? `${o.zones.map((z) => z.id).join(",")}|${o.aircraft.map((a) => `${a.id}:${a.lat.toFixed(4)},${a.lng.toFixed(4)}`).join(",")}` : "";
+
 export interface CesiumMapProps {
+  overlays?: MapOverlays;
   routes: Pt[][];       // routes[0] = active / selected flight
   progress?: number;    // 0..1 along routes[0] — enables the tracked vehicle
   heading?: number;     // vehicle heading (deg) from telemetry; omit if unknown
@@ -113,7 +122,7 @@ function aircraftIcon(color: string): HTMLCanvasElement {
 export default function CesiumMap({
   routes, progress, heading, speedKmh = 0, cameraMode, initialView = MANHATTAN_VIEW,
   corridorHeight, frame, orbit = false, simulate = false, endpointLabels,
-  interactive = true, wheelZoom = true, color = BRAND_HEX, label, onReady,
+  interactive = true, wheelZoom = true, color = BRAND_HEX, label, onReady, overlays,
 }: CesiumMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<EngineResult | null>(null);
@@ -332,6 +341,58 @@ export default function CesiumMap({
   }, [ready, stableRoutes, color, corridorHeight, labelsKey]);
 
   // ── Frame on request (never automatic) ────────────────────────────────────
+  // ── Real-data overlays: TFR outlines (red, ground-clamped) + live ADS-B ──
+  const oKey = overlaysKey(overlays);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const stableOverlays = useMemo(() => overlays, [oKey]);
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!ready || !engine || engine.widget.isDestroyed() || !stableOverlays) return;
+    const scene = engine.widget.scene;
+    const zoneColor = Color.fromCssColorString("#ef4444");
+    const ground: GroundPolylinePrimitive[] = [];
+    const pts = scene.primitives.add(new PointPrimitiveCollection()) as PointPrimitiveCollection;
+    const lbls = scene.primitives.add(new LabelCollection()) as LabelCollection;
+    for (const z of stableOverlays.zones) {
+      for (const ring of z.rings) {
+        if (ring.length < 3) continue;
+        const closed = [...ring, ring[0]];
+        const g = new GroundPolylinePrimitive({
+          geometryInstances: new GeometryInstance({
+            geometry: new GroundPolylineGeometry({ positions: Cartesian3.fromDegreesArray(closed.flatMap((p) => [p.lng, p.lat])), width: 3 }),
+            attributes: { color: ColorGeometryInstanceAttribute.fromColor(zoneColor.withAlpha(0.9)) },
+          }),
+          appearance: new PerInstanceColorAppearance({ flat: true, translucent: true }),
+          asynchronous: false,
+        });
+        scene.primitives.add(g);
+        ground.push(g);
+      }
+      const all = z.rings.flat();
+      if (all.length) {
+        const c = { lat: all.reduce((a, p) => a + p.lat, 0) / all.length, lng: all.reduce((a, p) => a + p.lng, 0) / all.length };
+        lbls.add({ position: Cartesian3.fromDegrees(c.lng, c.lat, 150), text: z.label, font: "600 12px Inter, sans-serif",
+          fillColor: Color.WHITE, outlineColor: zoneColor, outlineWidth: 3, style: LabelStyle.FILL_AND_OUTLINE,
+          verticalOrigin: VerticalOrigin.BOTTOM, distanceDisplayCondition: new DistanceDisplayCondition(0, 120_000) });
+      }
+    }
+    for (const a of stableOverlays.aircraft) {
+      const pos = Cartesian3.fromDegrees(a.lng, a.lat, Math.max(30, a.altM ?? 30));
+      pts.add({ position: pos, pixelSize: 7, color: Color.fromCssColorString("#38bdf8"), outlineColor: Color.WHITE, outlineWidth: 1.5 });
+      lbls.add({ position: pos, text: a.label, font: "500 11px Inter, sans-serif", fillColor: Color.fromCssColorString("#e0f2fe"),
+        outlineColor: Color.BLACK, outlineWidth: 2, style: LabelStyle.FILL_AND_OUTLINE, pixelOffset: new Cartesian2(8, -8),
+        horizontalOrigin: HorizontalOrigin.LEFT, distanceDisplayCondition: new DistanceDisplayCondition(0, 40_000) });
+    }
+    scene.requestRender();
+    return () => {
+      if (engine.widget.isDestroyed()) return;
+      ground.forEach((g) => scene.primitives.remove(g));
+      scene.primitives.remove(pts);
+      scene.primitives.remove(lbls);
+      scene.requestRender();
+    };
+  }, [ready, stableOverlays]);
+
   useEffect(() => {
     const widget = engineRef.current?.widget;
     if (!ready || !widget || widget.isDestroyed() || !frame || frame.key === 0) return;

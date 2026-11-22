@@ -1,3 +1,21 @@
+// ── Real external data (FAA TFRs, AWC/NWS advisories, OpenSky ADS-B) ────────
+export interface RestrictionHit {
+  source: "faa-tfr"; notam: string; name: string | null; type: string | null;
+  valid_from: string | null; valid_to: string | null; alt_low_ft: number | null; alt_high_ft: number | null;
+  geometry_approximated: boolean; severity: "high";
+}
+export interface AdvisoryHit {
+  source: string; kind: string; hazard: string | null; valid_from: string; valid_to: string;
+  severity: "high" | "moderate" | "low"; headline: string | null; external_id: string;
+}
+export interface LiveTrafficHit {
+  source: "opensky"; icao24: string; callsign: string | null; distance_m: number; altitude_m: number | null;
+  age_s: number; severity: "high" | "moderate" | "low";
+}
+export interface LiveTrafficCheck { applicable: boolean; reason: string; hits: LiveTrafficHit[] }
+export interface SourceStatus { id: string; name: string; freshness: string; last_success_at: string | null; last_data_at: string | null }
+export interface ExternalDataStatus { ok: boolean; problems: string[]; sources: SourceStatus[]; checked_at: string }
+
 export interface RouteWaypoint {
   lat: number;
   lon: number;
@@ -37,6 +55,12 @@ export interface RouteCandidate {
   fuel_score?: number;
   wind_drift?: WindDrift;
   violated_no_fly_zone?: string | null;
+  airspace_restrictions?: RestrictionHit[];
+  weather_advisories?: AdvisoryHit[];
+  live_traffic?: LiveTrafficHit[];
+  /** Raw (uncalibrated) estimate; estimated_time_min applies the promoted duration model. */
+  raw_estimated_time_min?: number;
+  duration_calibration_factor?: number;
   wind_summary?: { avg_headwind_kmh: number; avg_crosswind_kmh: number };
   hazards?: RouteHazards;
   operational_note?: string;
@@ -60,13 +84,14 @@ export interface WeatherConditions {
   visibility: number;
 }
 
+/** Descriptive statistics from GPS-verified past flights on this route. */
 export interface HistoricalSuggestion {
   found: boolean;
-  is_user_specific?: boolean;
-  flight_count?: number;
-  completed_flight_count?: number;
-  avg_score?: number;
-  outcome_adjusted_score?: number | null;
+  source?: "verified_past_flights";
+  model_version?: number | null;
+  verified_flights?: number;
+  median_duration_min?: number;
+  median_deviation_m?: number;
   message?: string;
 }
 
@@ -90,6 +115,9 @@ export interface RouteOptimizerResult {
   weather_data?: { available_samples: number; total_samples: number; valid_for: string };
   weather_risk: "low" | "moderate" | "high" | "unknown";
   historical_suggestion: HistoricalSuggestion;
+  external_data?: ExternalDataStatus | null;
+  live_traffic?: LiveTrafficCheck | null;
+  model_versions?: Record<string, number>;
   analysis_summary: {
     total_conflicts: number;
     routes_evaluated: number;

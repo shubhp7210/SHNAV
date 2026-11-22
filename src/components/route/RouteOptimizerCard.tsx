@@ -1,3 +1,4 @@
+import ExternalAirspacePanel from "@/components/atm/ExternalAirspacePanel";
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -100,6 +101,10 @@ const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelect
   if (!routeData) return null;
 
   const { primary_route, alternate_routes, conflict_details, conflict_check, weather_conditions, weather_risk, historical_suggestion } = routeData;
+  // Live traffic shown for the SELECTED candidate when available.
+  const liveTraffic = routeData.live_traffic
+    ? { ...routeData.live_traffic, hits: primary_route.live_traffic ?? routeData.live_traffic.hits }
+    : null;
 
   return (
     <motion.div
@@ -145,6 +150,11 @@ const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelect
           <span>
             <span className="text-foreground font-semibold">{primary_route.estimated_time_min} min</span> est. flight time
           </span>
+          {primary_route.duration_calibration_factor != null && primary_route.duration_calibration_factor !== 1 && (
+            <span title={`Raw estimate ${primary_route.raw_estimated_time_min} min × ${primary_route.duration_calibration_factor} (calibrated from GPS-verified past flights)`}>
+              · calibrated ×{primary_route.duration_calibration_factor}
+            </span>
+          )}
         </div>
       </div>
 
@@ -228,33 +238,35 @@ const RouteOptimizerCard = ({ routeData, routeLoading, selectedRouteId, onSelect
           )}
         </div>
 
-        {/* Historical Pattern */}
+        {/* Verified history (descriptive; never altered the score) */}
         <div className="well rounded-lg p-4">
           <p className="text-xs font-mono tracking-widest uppercase text-muted-foreground mb-3">
-            Historical Pattern
+            Verified flight history
           </p>
           {historical_suggestion.found ? (
             <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/20 text-green-400 border border-green-500/30 font-mono">
-                  Route suggestion available
-                </span>
-              </div>
               <p className="text-xs text-muted-foreground">{historical_suggestion.message}</p>
               <div className="flex items-center gap-4 text-xs font-mono">
                 <span className="text-muted-foreground">
-                  Flights: <span className="text-foreground">{historical_suggestion.flight_count}</span>
+                  GPS-verified: <span className="text-foreground">{historical_suggestion.verified_flights}</span>
                 </span>
                 <span className="text-muted-foreground">
-                  Avg score: <span className="text-primary">{historical_suggestion.avg_score}</span>
+                  Median: <span className="text-primary">{historical_suggestion.median_duration_min} min</span>
                 </span>
               </div>
             </div>
           ) : (
-            <p className="text-xs text-muted-foreground">No historical data for this route pair.</p>
+            <p className="text-xs text-muted-foreground">{historical_suggestion.message ?? "No GPS-verified flights on this route yet."}</p>
           )}
         </div>
       </div>
+
+      <ExternalAirspacePanel
+        restrictions={primary_route.airspace_restrictions}
+        advisories={primary_route.weather_advisories}
+        liveTraffic={liveTraffic}
+        dataStatus={routeData.external_data}
+      />
 
       {/* Weather Stats */}
       <div>

@@ -28,6 +28,16 @@ export interface WeatherIntelligenceResult {
   source?: string;
   /** Forecast slot (UTC) the origin values are valid for — the departure time. */
   valid_at?: string;
+  /** Forecast vs nearest real METAR (only for departures within the hour). */
+  cross_check?: {
+    status: "agree" | "disagree" | "no_observation" | "not_applicable";
+    reason: string;
+    observation?: { station: string; obs_time: string; distance_km: number; age_minutes: number;
+      wind_kmh: number | null; gust_kmh: number | null; visibility_sm: number | null; flight_category: string | null; raw: string };
+    deltas?: { wind_kmh: number | null; gust_kmh: number | null };
+  };
+  /** true when the risk was raised to match a disagreeing observation. */
+  observation_override?: boolean;
   origin_weather: WeatherAtLocation;
   destination_weather: (Omit<WeatherAtLocation, "visibility_m" | "temperature" | "micro_effects"> & { valid_at?: string }) | null;
   forecast: {
@@ -154,6 +164,16 @@ export interface FlightDecisionResult {
   simulation: SimulationResult;
   /** Inputs the engine could not assess (stated in the reason too). */
   data_quality?: string[];
+  /** Guidance from error patterns the user CONFIRMED (never applied silently). */
+  user_guidance?: string[];
+  /** Fresh check of the chosen route against real TFR / advisory / ADS-B data. */
+  external?: {
+    restrictions: import("./routeTypes").RestrictionHit[];
+    advisories: import("./routeTypes").AdvisoryHit[];
+    live_traffic: import("./routeTypes").LiveTrafficCheck;
+    data_status: import("./routeTypes").ExternalDataStatus;
+  } | null;
+  model_versions?: Record<string, number>;
   inputs_summary: {
     trajectory_score: number;
     weather_risk: string;

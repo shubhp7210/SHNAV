@@ -206,6 +206,22 @@ export default function WeatherIntelligenceCard({ weather }: Props) {
             <span>±{weather.forecast.t_plus_30.uncertainty_pct}% at +30</span>
           </div>
         </div>
+
+        {/* Cross-reference: forecast vs the nearest real METAR */}
+        {weather.cross_check && (
+          <div className={`rounded-md border px-3 py-2 text-[11px] font-mono ${
+            weather.cross_check.status === "disagree" ? "bg-amber-500/10 border-amber-500/30 text-amber-200"
+              : weather.cross_check.status === "agree" ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-200"
+              : "bg-white/5 border-white/10 text-white/50"}`}>
+            <div className="uppercase tracking-widest text-[9px] opacity-70 mb-0.5">Forecast vs observed (METAR)</div>
+            <div>{weather.cross_check.status === "agree" ? "Agrees" : weather.cross_check.status === "disagree" ? "Disagrees" :
+                  weather.cross_check.status === "no_observation" ? "No observation" : "Not applicable"} — {weather.cross_check.reason}</div>
+            {weather.cross_check.observation && (
+              <div className="opacity-70 mt-0.5 break-all">{weather.cross_check.observation.raw} · {weather.cross_check.observation.distance_km} km · {weather.cross_check.observation.age_minutes} min old</div>
+            )}
+            {weather.observation_override && <div className="mt-0.5">Risk raised to match the observation.</div>}
+          </div>
+        )}
       </div>
     </motion.div>
   );

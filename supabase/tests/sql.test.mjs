@@ -166,12 +166,13 @@ test("flight outcome is recorded exactly once under concurrent calls", async () 
   const recorded = out.map((r) => r.rows[0].r).filter((r) => !r.already_recorded);
   assert.equal(recorded.length, 1);
   assert.equal((await q(`SELECT count(*)::int n FROM flight_outcomes WHERE flight_intent_id=$1`, [id])).rows[0].n, 1);
+  // A landing report is stored verbatim and learns NOTHING by itself (2026-11-15):
+  // no pattern/weight/profile changes until the flight is verified and reconciled.
   const fleet = (await q(`SELECT completed_flight_count c FROM route_patterns WHERE origin_key='pier a' AND user_id IS NULL`)).rows[0];
-  assert.equal(fleet.c, 1);
-  const prof = (await q(`SELECT total_flights FROM user_error_profiles WHERE user_id=$1`, [USER])).rows[0];
-  assert.equal(prof.total_flights, 1);
-  // landed → archived by the existing trigger
-  assert.equal((await q(`SELECT status FROM flight_intents WHERE id=$1`, [id])).rows[0].status, "archived");
+  assert.equal(fleet.c, 0);
+  assert.equal((await q(`SELECT count(*)::int n FROM user_error_profiles WHERE user_id=$1`, [USER])).rows[0].n, 0);
+  // landed stays landed until finalize_flight() confirms the end and moves it to past_flights.
+  assert.equal((await q(`SELECT status FROM flight_intents WHERE id=$1`, [id])).rows[0].status, "landed");
   // Someone else's flight is refused.
   const foreign = (await q(`SELECT record_flight_outcome_tx($1, $2, '{}'::jsonb) r`, [OTHER, id])).rows[0].r;
   assert.equal(foreign.error, "not_found");
@@ -212,7 +213,7 @@ test("clients can only report take-off and landing on their own flights", async 
   assert.equal(other.rowCount, 0); // RLS: not their row
   await asUser(USER, (c) => c.query(`UPDATE flight_intents SET status='in_air' WHERE id=$1`, [id]));
   await asUser(USER, (c) => c.query(`UPDATE flight_intents SET status='landed', landed_at=now() WHERE id=$1`, [id]));
-  assert.equal((await q(`SELECT status FROM flight_intents WHERE id=$1`, [id])).rows[0].status, "archived");
+  assert.equal((await q(`SELECT status FROM flight_intents WHERE id=$1`, [id])).rows[0].status, "landed");
 });
 
 test("API roles cannot read ops tables or call privileged functions", async () => {
@@ -266,11 +267,19 @@ test("nightly pattern refresh keys on the place name, not the coordinate tag", a
   assert.equal(p[0].a, 80);
 });
 
-test("rollback script reverts cleanly and the migration re-applies", async () => {
+test("rollback scripts revert cleanly and the migrations re-apply", async () => {
+  // Newest first: 20261115 depends on 20261102 columns.
+  await q(sqlFile("rollback", "20261115000000_data_platform.down.sql"));
+  await q(sqlFile("migrations", "20261102000000_production_readiness.sql")); // restores the previous function bodies
+  assert.equal((await q(`SELECT to_regclass('public.past_flights') r`)).rows[0].r, null);
+  assert.equal((await q(`SELECT to_regclass('public.wx_metar') r`)).rows[0].r, null);
   await q(sqlFile("rollback", "20261102000000_production_readiness.down.sql"));
   const col = (await q(`SELECT count(*)::int n FROM information_schema.columns WHERE table_name='flight_intents' AND column_name='departure_start_at'`)).rows[0].n;
   assert.equal(col, 0);
   assert.equal((await q(`SELECT to_regclass('public.error_events') r`)).rows[0].r, null);
   await q(sqlFile("migrations", "20261102000000_production_readiness.sql"));
   assert.equal((await q(`SELECT count(*)::int n FROM information_schema.columns WHERE table_name='flight_intents' AND column_name='departure_start_at'`)).rows[0].n, 1);
+  await q(sqlFile("migrations", "20261115000000_data_platform.sql"));
+  assert.notEqual((await q(`SELECT to_regclass('public.past_flights') r`)).rows[0].r, null);
+  assert.equal((await q(`SELECT count(*)::int n FROM model_params WHERE status='active'`)).rows[0].n, 4);
 });

@@ -14,13 +14,25 @@ import { requireUserAuth } from "../_shared/auth.ts";
 import { checkRateLimit, tooManyRequests } from "../_shared/ratelimit.ts";
 import { readBody, validateFields } from "../_shared/validate.ts";
 import { departureRisk } from "../_shared/weather.ts";
-import { decide, type DecisionInputs, type RouteAlt } from "../_shared/decision.ts";
+import { decide, type DecisionInputs, type ExternalInputs, type RouteAlt } from "../_shared/decision.ts";
+import { evaluateExternal, loadExternal } from "../_shared/external.ts";
 import { logInfo } from "../_shared/log.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FRESH_MS = 30 * 60_000;
 
-interface Candidate { id: string; label: string; overall_score?: number; traffic_score?: number }
+interface Candidate {
+  id: string; label: string; overall_score?: number; traffic_score?: number;
+  waypoints?: { lat: number; lon: number }[]; estimated_time_min?: number;
+}
+
+/** Guidance text for error patterns the user has CONFIRMED (never applied otherwise). */
+const PATTERN_GUIDANCE: Record<string, (e: Record<string, unknown>) => string> = {
+  late_departure: () => "You confirmed you often take off after the filed window — consider filing a later window so your slot and conflict checks match reality.",
+  early_departure: () => "You confirmed you often take off before the filed window opens — the conflict check only covers the window you file.",
+  unresolved_locations: () => "You confirmed locations are often entered imprecisely — pick origin and destination from the search results.",
+  destination_mismatch: () => "You confirmed flights often end away from the filed destination — check the destination before filing.",
+};
 
 serve("flight-decision-engine", async ({ req, admin, json, cors, setUser }) => {
   const user = await requireUserAuth(req);
@@ -66,9 +78,41 @@ serve("flight-decision-engine", async ({ req, admin, json, cors, setUser }) => {
     ? await departureRisk(fi.origin_lat, fi.origin_lon, departureStart, fi.altitude_band ?? "low")
     : { available: false as const };
 
-  const { data: profile } = await admin.from("user_error_profiles")
-    .select("confidence_adjustment").eq("user_id", user.id).maybeSingle();
-  const userAdj = Number(profile?.confidence_adjustment ?? 0);
+  // Only CONFIRMED patterns become guidance; suspected ones are never assumed.
+  const { data: flags } = await admin.from("user_pattern_flags")
+    .select("pattern, evidence").eq("user_id", user.id).eq("status", "confirmed");
+  const userGuidance = (flags ?? []).map((f: { pattern: string; evidence: Record<string, unknown> }) =>
+    PATTERN_GUIDANCE[f.pattern]?.(f.evidence)).filter((g): g is string => !!g);
+
+  // Fresh check of every saved candidate against real external data.
+  let external: ExternalInputs | null = null;
+  let externalDetail: unknown = null;
+  if (routeRow?.primary_route) {
+    const all: Candidate[] = [routeRow.primary_route as Candidate, ...((routeRow.alternate_routes ?? []) as Candidate[])];
+    const chosen = all.find((c) => c.id === body.selected_candidate_id) ?? all[0];
+    const longest = Math.max(10, ...all.map((c) => Number(c.estimated_time_min ?? 0)));
+    const endMs = new Date(fi.departure_start_at).getTime() + (longest + 30) * 60_000;
+    const ext = await loadExternal(admin, departureStart.getTime(), endMs);
+    const evals = all.map((c) => ({ c, e: evaluateExternal(c.waypoints ?? [], fi.altitude_band ?? "low", departureStart.getTime(), endMs, ext) }));
+    const mine = evals.find((x) => x.c === chosen)!.e;
+    const clear = evals.find((x) => x.c !== chosen && x.e.restrictions.length === 0 && !x.e.advisories.some((a) => a.severity === "high"));
+    external = {
+      restrictions: {
+        names: mine.restrictions.map((r) => `${r.notam}${r.name ? ` ${r.name}` : ""}`),
+        until: mine.restrictions.map((r) => r.valid_to).filter((v): v is string => !!v).sort().slice(-1)[0] ?? null,
+      },
+      clearAlternate: clear ? { id: clear.c.id, label: clear.c.label, traffic_score: clear.c.traffic_score } : null,
+      advisories: {
+        high: mine.advisories.filter((a) => a.severity === "high").map((a) => `${a.kind}${a.hazard ? ` ${a.hazard}` : ""}`),
+        moderate: mine.advisories.filter((a) => a.severity === "moderate").map((a) => `${a.kind}${a.hazard ? ` ${a.hazard}` : ""}`),
+      },
+      liveTraffic: { applicable: mine.live_traffic.applicable, close: mine.live_traffic.hits.filter((h) => h.severity === "high").length },
+      dataStatus: { ok: mine.data_status.ok, problems: mine.data_status.problems },
+    };
+    externalDetail = { restrictions: mine.restrictions, advisories: mine.advisories, live_traffic: mine.live_traffic, data_status: mine.data_status };
+  }
+  const { data: mp } = await admin.rpc("active_model_params");
+  const modelVersions = Object.fromEntries(Object.entries((mp ?? {}) as Record<string, { version: number }>).map(([k, v]) => [k, v.version]));
 
   const inputs: DecisionInputs = {
     trajectoryScore: Number(fi.trajectory_score ?? 0),
@@ -81,7 +125,8 @@ serve("flight-decision-engine", async ({ req, admin, json, cors, setUser }) => {
     vertiport: vs ? { checked: !!vs.checked, reserved: !!vs.reserved, delayMinutes: vs.delay_minutes } : null,
     route,
     departureStart,
-    userConfidenceAdj: userAdj,
+    external,
+    userGuidance,
   };
   const out = decide(inputs);
 
@@ -98,6 +143,7 @@ serve("flight-decision-engine", async ({ req, admin, json, cors, setUser }) => {
     weather_risk: weather.available ? (weather.riskScore >= 60 ? "high" : weather.riskScore >= 30 ? "moderate" : "low") : "unknown",
     airspace_load: inputs.airspace?.loadPct ?? null,
     simulation_result: out.simulation,
+    model_versions: modelVersions,
     inputs: { ...inputs, departureStart: departureStart.toISOString(), weather_valid_at: weather.available ? weather.validAt : null },
   }).select("id").single();
   if (saveErr) throw new Error(`flight_decisions insert failed: ${saveErr.message}`);
@@ -114,7 +160,9 @@ serve("flight-decision-engine", async ({ req, admin, json, cors, setUser }) => {
     route_id: out.routeCandidateId,
     simulation: out.simulation,
     data_quality: out.notes,
-    user_confidence_adjustment: userAdj,
+    user_guidance: userGuidance,
+    external: externalDetail,
+    model_versions: modelVersions,
     inputs_summary: {
       trajectory_score: inputs.trajectoryScore,
       weather_risk: weather.available ? (weather.riskScore >= 60 ? "high" : weather.riskScore >= 30 ? "moderate" : "low") : "unknown",

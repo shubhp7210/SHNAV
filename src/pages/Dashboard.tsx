@@ -1,3 +1,5 @@
+import { useLiveAirspace } from "@/lib/useLiveAirspace";
+import PastFlightsPanel from "@/components/dashboard/PastFlightsPanel";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
@@ -6,7 +8,7 @@ import {
   CheckCircle2, AlertCircle, CheckCircle, Navigation, ChevronRight, MapPin,
   Crosshair, LocateFixed, X, Radio,
 } from "lucide-react";
-import MapView from "@/components/MapView";
+import MapView, { type MapOverlays } from "@/components/MapView";
 import type { FrameRequest } from "@/components/CesiumMap";
 import Logo from "@/components/Logo";
 import { MANHATTAN_VIEW, type Pt } from "@/lib/geo/region";
@@ -26,18 +28,7 @@ interface FlightRecord {
   conflicts: number;
   created_at: string;
 }
-interface HistoricalFlight {
-  id: string;
-  aircraft_id: string;
-  origin: string;
-  destination: string;
-  trajectory_score: number;
-  weather_risk: string | null;
-  conflicts: number;
-  scheduled_departure: string | null;
-  landed_at: string | null;
-  archived_at: string;
-}
+interface HistoricalFlight { id: string; verification_status: string }
 interface Vertiport { name: string; lat: number; lon: number }
 /** A flight that has real coordinates for both ends. */
 interface MappedFlight { id: string; poly: Pt[] }
@@ -92,10 +83,11 @@ function Spinner({ label = "Loading…" }: { label?: string }) {
 /** Operations map: always opens on Manhattan. Shows real flights only — when no
  *  flight has coordinates, the map is empty rather than showing invented routes. */
 export function OpsMap({
-  routes = [], interactive = true, frame,
-}: { routes?: Pt[][]; interactive?: boolean; frame?: FrameRequest }) {
+  routes = [], interactive = true, frame, overlays,
+}: { routes?: Pt[][]; interactive?: boolean; frame?: FrameRequest; overlays?: MapOverlays }) {
   return (
     <MapView
+      overlays={overlays}
       routes={routes}
       initialView={MANHATTAN_VIEW}
       interactive={interactive}
@@ -180,8 +172,8 @@ function UserMenu({ name, email, onSignOut }: { name: string; email?: string; on
 type Tab = "overview" | "flights" | "history";
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
-  { id: "flights", label: "Flights" },
-  { id: "history", label: "History" },
+  { id: "flights", label: "Active flights" },
+  { id: "history", label: "Past flights" },
 ];
 
 export default function Dashboard() {
@@ -198,6 +190,7 @@ export default function Dashboard() {
   const [clock, setClock] = useState("");
   const [vertiports, setVertiports] = useState<Vertiport[]>([]);
   const [frame, setFrame] = useState<FrameRequest>({ key: 0 });
+  const live = useLiveAirspace(!!user);
 
   useEffect(() => {
     const tick = () => setClock(new Date().toISOString().slice(11, 19));
@@ -218,10 +211,8 @@ export default function Dashboard() {
             .not("status", "in", "(landed,archived,expired)")
             .order("created_at", { ascending: false })
             .limit(12),
-          supabase.from("historical_flights")
-            .select("id,aircraft_id,origin,destination,trajectory_score,weather_risk,conflicts,scheduled_departure,landed_at,archived_at")
-            .order("archived_at", { ascending: false })
-            .limit(30),
+          // Past flights live in their own store; this only feeds the overview count.
+          supabase.from("past_flights").select("id,verification_status").limit(1000),
           // Current decision per flight only (re-runs mark older ones superseded).
           supabase.from("flight_decisions").select("decision").eq("superseded", false),
           supabase.from("vertiports").select("name,lat,lon").eq("is_active", true),
@@ -311,6 +302,15 @@ export default function Dashboard() {
             {activeCount > 0 && <span className="text-signal"> · {activeCount} active</span>}
           </>
         )}
+        {live.loaded && (
+          <div className="mt-0.5 text-foreground/55">
+            {live.tfrs.length > 0
+              ? <span className="text-destructive">{live.tfrs.length} active TFR{live.tfrs.length === 1 ? "" : "s"} ({live.tfrs.map((t) => t.id).join(", ")})</span>
+              : "No active TFRs in region"}
+            {" · "}{live.aircraftCount} live ADS-B aircraft
+            {live.trafficAsOf && <span className="text-foreground/40"> @ {new Date(live.trafficAsOf).toLocaleTimeString()}</span>}
+          </div>
+        )}
       </div>
     </>
   );
@@ -381,7 +381,7 @@ export default function Dashboard() {
               className="absolute inset-0 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden"
             >
               <div className="relative shrink-0 h-[46vh] min-h-[300px] lg:h-auto lg:flex-1 lg:min-w-0">
-                <OpsMap routes={mapRoutes} frame={frame} />
+                <OpsMap routes={mapRoutes} frame={frame} overlays={live.overlays} />
                 {mapOverlay}
               </div>
 
@@ -452,7 +452,7 @@ export default function Dashboard() {
                       {[
                         { label: "Vertiports", value: vertiports.length },
                         { label: "Mapped", value: mapped.length },
-                        { label: "Archived", value: historical.length },
+                        { label: "Past", value: historical.length },
                       ].map(({ label, value }) => (
                         <div key={label} className="well rounded-lg px-3 py-2.5">
                           <dt className="label-caps">{label}</dt>
@@ -522,7 +522,7 @@ export default function Dashboard() {
               className="absolute inset-0 flex flex-col md:block overflow-y-auto md:overflow-hidden"
             >
               <div className="relative shrink-0 h-[44vh] min-h-[280px] md:absolute md:inset-0 md:h-auto">
-                <OpsMap routes={mapRoutes} frame={frame} />
+                <OpsMap routes={mapRoutes} frame={frame} overlays={live.overlays} />
                 {mapOverlay}
               </div>
 
@@ -635,56 +635,7 @@ export default function Dashboard() {
               transition={{ duration: 0.18 }}
               className="absolute inset-0 overflow-y-auto"
             >
-              <div className="max-w-5xl mx-auto px-4 py-6">
-                <div className="flex items-end justify-between mb-4">
-                  <div>
-                    <h2 className="text-xl font-semibold">Flight history</h2>
-                    <p className="text-xs text-muted-foreground mt-1">{historical.length} archived flight{historical.length === 1 ? "" : "s"}</p>
-                  </div>
-                </div>
-
-                {loadingFlights ? <Spinner /> : historical.length === 0 ? (
-                  <div className="panel rounded-2xl p-12 text-center">
-                    <Plane className="w-8 h-8 text-muted-foreground/40 mx-auto mb-3" />
-                    <p className="text-sm font-medium">No completed flights yet</p>
-                    <p className="text-xs text-muted-foreground mt-1">Landed flights appear here for analytics.</p>
-                  </div>
-                ) : (
-                  <div className="panel rounded-2xl overflow-hidden" role="table" aria-label="Archived flights">
-                    <div role="row" className="grid grid-cols-[40px_1fr_auto] md:grid-cols-[40px_1fr_70px_90px_130px] gap-4 px-5 py-2.5 border-b border-border bg-white/[0.02]">
-                      {["", "Route", "Score", "Weather", "Landed"].map((h, i) => (
-                        <span key={i} role="columnheader" className={`label-caps ${i === 2 || i === 3 ? "hidden md:block" : ""}`}>{h}</span>
-                      ))}
-                    </div>
-                    <div className="divide-y divide-border">
-                      {historical.map((h, i) => (
-                        <motion.div
-                          role="row"
-                          key={h.id}
-                          initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                          transition={{ delay: Math.min(i, 15) * 0.025 }}
-                          className="grid grid-cols-[40px_1fr_auto] md:grid-cols-[40px_1fr_70px_90px_130px] gap-4 items-center px-5 py-3.5 hover:bg-white/[0.03] transition-colors"
-                        >
-                          <ScoreRing score={h.trajectory_score ?? 0} size={36} />
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5 text-[13px]">
-                              <span className="font-medium truncate">{placeName(h.origin)}</span>
-                              <ArrowRight className="w-3 h-3 text-muted-foreground shrink-0" />
-                              <span className="truncate text-foreground/65">{placeName(h.destination)}</span>
-                            </div>
-                            <p className="text-[11px] font-mono text-muted-foreground mt-0.5">{h.aircraft_id || "—"}</p>
-                          </div>
-                          <span className="hidden md:block text-xs font-mono tabular text-foreground/75">{h.trajectory_score ?? "—"}</span>
-                          <span className="hidden md:block text-xs font-mono text-muted-foreground capitalize">{h.weather_risk ?? "n/a"}</span>
-                          <span className="text-[11px] font-mono text-muted-foreground tabular text-right md:text-left">
-                            {new Date(h.landed_at ?? h.archived_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
-                          </span>
-                        </motion.div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
+              <PastFlightsPanel userId={user?.id} />
             </motion.div>
           )}
         </AnimatePresence>

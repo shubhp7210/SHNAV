@@ -21,7 +21,22 @@ export interface DecisionInputs {
   vertiport: null | { checked: boolean; reserved: boolean; delayMinutes: number | null };
   route: null | { primaryId: string; primaryScore: number; alternates: RouteAlt[] };
   departureStart: Date;
-  userConfidenceAdj: number;
+  /** Real external data (FAA TFRs, SIGMET/AIRMET/NWS, ADS-B) along the chosen route. */
+  external?: ExternalInputs | null;
+  /** Guidance from error patterns the USER HAS CONFIRMED. Never changes the
+   *  decision or confidence silently — it is shown as a note. */
+  userGuidance?: string[];
+}
+
+export interface ExternalInputs {
+  /** TFRs the chosen route enters during the departure window. */
+  restrictions: { names: string[]; until: string | null };
+  /** An alternate candidate that avoids every active TFR/high advisory, if any. */
+  clearAlternate: RouteAlt | null;
+  advisories: { high: string[]; moderate: string[] };
+  liveTraffic: { applicable: boolean; close: number };
+  /** "checked" = all safety sources fresh; otherwise names what was stale/missing. */
+  dataStatus: { ok: boolean; problems: string[] };
 }
 
 export interface DecisionResult {
@@ -53,7 +68,31 @@ export function decide(i: DecisionInputs): DecisionResult {
   let delay = 0;
   let candidate: string | null = i.route?.primaryId ?? null;
 
-  if (!wx.available) {
+  const ext = i.external ?? null;
+  if (ext && ext.restrictions.names.length > 0) {
+    const names = ext.restrictions.names.join(", ");
+    if (ext.clearAlternate) {
+      decision = "REROUTE"; candidate = ext.clearAlternate.id; confidence = 82;
+      reason = `The selected route enters an active FAA TFR (${names}). Rerouting via ${ext.clearAlternate.label}, which avoids it.`;
+    } else {
+      const untilMin = ext.restrictions.until
+        ? Math.ceil((Date.parse(ext.restrictions.until) - i.departureStart.getTime()) / 60_000) : null;
+      delay = untilMin != null && untilMin > 0 ? Math.min(240, Math.max(15, untilMin)) : 60;
+      decision = "DELAY"; confidence = 88;
+      reason = untilMin != null && untilMin <= 240
+        ? `Every candidate route enters an active FAA TFR (${names}) until ${ext.restrictions.until}. Hold ${delay} minutes.`
+        : `Every candidate route enters an active FAA TFR (${names}). Hold ${delay} minutes and re-file — do not depart into restricted airspace.`;
+    }
+  } else if (ext && ext.advisories.high.length > 0) {
+    const names = ext.advisories.high.join(", ");
+    if (ext.clearAlternate) {
+      decision = "REROUTE"; candidate = ext.clearAlternate.id; confidence = 76;
+      reason = `Active ${names} covers the selected route. Rerouting via ${ext.clearAlternate.label}.`;
+    } else {
+      decision = "DELAY"; delay = 30; confidence = 76;
+      reason = `Active ${names} covers every candidate route. Delay 30 minutes and re-evaluate.`;
+    }
+  } else if (!wx.available) {
     decision = "DELAY"; delay = 10; confidence = 50;
     reason = "Live weather for the departure time is unavailable — holding 10 minutes for re-evaluation. A GO is never issued without weather data.";
   } else if (i.airspace && !i.airspace.allocated) {
@@ -120,7 +159,18 @@ export function decide(i: DecisionInputs): DecisionResult {
   if (i.vertiport === null) { confidence -= 10; notes.push("Vertiport capacity was not assessed."); }
   else if (!i.vertiport.checked) notes.push("No registered vertiport within 3 km of an endpoint — pad capacity not checked.");
   if (i.conflictCheck === "incomplete") { confidence -= 10; notes.push("Conflict check incomplete — some traffic lacked position or time data."); }
-  confidence = Math.max(10, Math.min(98, Math.round(confidence + i.userConfidenceAdj)));
+  if (ext) {
+    if (ext.advisories.moderate.length) { confidence -= 5; notes.push(`Advisory along route: ${ext.advisories.moderate.join(", ")}.`); }
+    if (ext.liveTraffic.applicable && ext.liveTraffic.close > 0) {
+      confidence -= 5;
+      notes.push(`Live ADS-B: ${ext.liveTraffic.close} low-altitude aircraft within 500 m of the route right now — maintain see-and-avoid.`);
+    }
+    if (!ext.dataStatus.ok) { confidence -= 5; notes.push(`External data degraded: ${ext.dataStatus.problems.join("; ")}.`); }
+  } else {
+    confidence -= 5; notes.push("TFR / advisory / live-traffic data was not checked.");
+  }
+  confidence = Math.max(10, Math.min(98, Math.round(confidence)));
+  for (const g of i.userGuidance ?? []) notes.push(g);
 
   const totalDelay = Math.max(delay, airspaceDelay, vertiportDelay);
   if (decision === "DELAY") delay = totalDelay;

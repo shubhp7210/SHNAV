@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { hasWebGL } from "@/lib/webgl";
 import Map3D from "@/components/Map3D";
 import type { Pt, TargetView } from "@/lib/geo/region";
-import type { FrameRequest } from "@/components/CesiumMap";
+import type { FrameRequest, MapOverlays } from "@/components/CesiumMap";
 import MapLoading from "@/components/MapLoading";
 import type { CameraMode } from "@/lib/cesium/cameraModes";
 
@@ -14,6 +14,9 @@ const CesiumMap = lazy(() => import("@/components/CesiumMap"));
 // renderer when WebGL is available, else the WebGL-free canvas renderer. Exactly
 // one renderer mounts — they never run simultaneously.
 export interface MapViewProps {
+  /** Real external data (TFR outlines, live ADS-B). Cesium only — the canvas
+   *  fallback cannot draw them, so callers also list them as text. */
+  overlays?: MapOverlays;
   routes: Pt[][];
   progress?: number;
   heading?: number;
@@ -88,4 +91,4 @@ export default function MapView(props: MapViewProps) {
   );
 }
 
-export type { Pt, FrameRequest };
+export type { Pt, FrameRequest, MapOverlays };

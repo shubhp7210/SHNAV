@@ -125,7 +125,7 @@ describe("decision engine", () => {
     vertiport: { checked: true, reserved: true, delayMinutes: 0 },
     route: { primaryId: "direct", primaryScore: 88, alternates: [{ id: "port-wide", label: "Port deviation (wide)", traffic_score: 90 }] },
     departureStart: new Date("2026-11-03T15:00:00Z"),
-    userConfidenceAdj: 0,
+    external: { restrictions: { names: [], until: null }, clearAlternate: null, advisories: { high: [], moderate: [] }, liveTraffic: { applicable: false, close: 0 }, dataStatus: { ok: true, problems: [] } },
   };
   it("issues GO only when everything is nominal", () => {
     const r = decide(base);

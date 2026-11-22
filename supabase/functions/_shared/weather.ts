@@ -42,7 +42,7 @@ export async function fetchForecastPoints(lat: number, lon: number, at: Date) {
   try {
     countCall("open-meteo");
     const res = await fetch(forecastUrl(lat, lon, at), { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) return [];
+    if (!res.ok) { await res.body?.cancel(); return []; }
     return parseMinutely(await res.json());
   } catch {
     return [];

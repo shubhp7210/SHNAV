@@ -1,7 +1,10 @@
 // Route optimizer — generates multiple candidate routes, scores them on
 // time / wind / weather / turbulence / fuel / traffic / safety, and returns
-// the top 3. Weights are pulled from route_score_config so the learning loop
-// can adjust them from actual outcomes.
+// the top 3. Weights, duration calibration and wind-bias correction come from
+// the ACTIVE versioned model_params (promoted by the nightly as-of training
+// with a holdout gate). Planning never reads past flights directly. Every
+// candidate is also checked against real FAA TFRs, SIGMET/AIRMET/NWS
+// advisories and (for imminent departures) live ADS-B traffic.
 import { EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
 import { requireUserAuth } from "../_shared/auth.ts";
 import { checkRateLimit, tooManyRequests } from "../_shared/ratelimit.ts";
@@ -10,6 +13,8 @@ import { readBody, validateFields } from "../_shared/validate.ts";
 import { checkNetwork, type Conflict } from "../_shared/conflicts.ts";
 import { loadTraffic, trackFromRow } from "../_shared/traffic.ts";
 import { trafficLabel } from "../_shared/anonymize.ts";
+import { applyWindBias, durationFactor } from "../_shared/airspace.ts";
+import { evaluateExternal, externalPenalty, loadExternal, type ExternalEvaluation } from "../_shared/external.ts";
 import {
   bearingDeg,
   haversineKm as haversine,
@@ -166,6 +171,8 @@ async function evaluateRoute(
   let sumHead = 0, sumCross = 0, sumWxSev = 0, maxWxSev = 0, sumTurb = 0, maxTurb = 0, sumIcing = 0, sumVis = 0, minVis = Infinity, worstWxCode = 0;
   for (let i = 0; i < wxList.length; i++) {
     const wx = wxList[i];
+    // Unavailable samples carry placeholder zeros — never average them in as calm weather.
+    if (!wx.available) continue;
     const t = i / Math.max(1, wxList.length - 1);
     const legIdx = Math.min(bearings.length - 1, Math.max(0, Math.floor(t * bearings.length)));
     const heading = bearings[legIdx] ?? bearings[0] ?? 0;
@@ -183,7 +190,7 @@ async function evaluateRoute(
     if (wx.visibilityM < minVis) minVis = wx.visibilityM;
     if (wx.weatherCode > worstWxCode) worstWxCode = wx.weatherCode;
   }
-  const n = Math.max(1, wxList.length);
+  const n = Math.max(1, wxList.filter((w) => w.available).length);
   const effectiveSpeed = Math.max(40, EVTOL_BASE_SPEED_KMH - sumHead / n);
   const timeMin = (distanceKm / effectiveSpeed) * 60;
   const baseTimeMin = (distanceKm / EVTOL_BASE_SPEED_KMH) * 60;
@@ -345,20 +352,30 @@ serve("route-optimizer", async ({ req, admin: supabase, json, cors: corsHeaders,
       .not("boundary_polygon", "is", null);
     const noFlyZones = (noFlySegments ?? []).filter(s => s.boundary_polygon);
 
+    // ── 3b. Active model parameters (versioned; promoted by as-of training) ──
+    const { data: mp, error: mpErr } = await supabase.rpc("active_model_params");
+    if (mpErr) console.error("[route-optimizer] active_model_params failed", mpErr.message);
+    const models = (mp ?? {}) as Record<string, { version: number; params: Record<string, unknown>; n_train: number }>;
+    const modelVersions = Object.fromEntries(Object.entries(models).map(([k, v]) => [k, v.version]));
+
     // ── 4. Evaluate candidates ──────────────────────────────────────────
-    const wxCache = new WxCache(departureStart);
+    const rawWx = new WxCache(departureStart);
+    const windModel = models.wind_bias as Parameters<typeof applyWindBias>[2];
+    const wxCache = {
+      get: async (lat: number, lon: number) => {
+        const w = await rawWx.get(lat, lon);
+        if (!w.available) return w;
+        const b = applyWindBias(w.windSpeedKmh, w.windGustsKmh, windModel);
+        return { ...w, windSpeedKmh: b.windKmh, windGustsKmh: b.gustKmh };
+      },
+    } as unknown as WxCache;
     const evals = await Promise.all(candidates.map((c) => evaluateRoute(c.waypoints, wxCache, conflictDensity)));
     const fastestTime = Math.min(...evals.map((e) => e.timeMin));
     const shortestDist = Math.min(...evals.map((e) => e.distanceKm));
 
-    // ── 5. Load scoring weights ─────────────────────────────────────────
+    // ── 5. Scoring weights (active model_params; static defaults otherwise) ──
     let weights: ScoreWeights = { ...DEFAULT_WEIGHTS };
-    const { data: cfg } = await supabase
-      .from("route_score_config")
-      .select("*")
-      .order("updated_at", { ascending: false })
-      .limit(1)
-      .single();
+    const cfg = models.route_weights?.params as Partial<Record<keyof ScoreWeights, number>> | undefined;
     if (cfg) {
       weights = {
         weight_safety: Number(cfg.weight_safety ?? DEFAULT_WEIGHTS.weight_safety),
@@ -370,30 +387,23 @@ serve("route-optimizer", async ({ req, admin: supabase, json, cors: corsHeaders,
       };
     }
 
-    // ── 6. Historical bias — user-specific first, fleet fallback ────────
+    // ── 6. Route statistics from VERIFIED past flights (descriptive only) ──
+    // The old "outcome-adjusted" drift compared a heuristic to the prediction
+    // (circular) — removed. Stats come from the promoted route_stats snapshot.
     const originKey = odKey(origin);
     const destKey = odKey(destination);
+    const routeStats = ((models.route_stats?.params as { routes?: Record<string, {
+      verified_flights: number; median_duration_min: number; median_deviation_m: number; last_flight_at: string }> })
+      ?.routes ?? {})[`${originKey}|${destKey}|${band}`] ?? null;
+    const durFactor = durationFactor(models.duration_calibration as Parameters<typeof durationFactor>[0], band);
 
-    // altitude_band is part of the unique key on route_patterns — omitting it
-    // makes maybeSingle() error once the same OD pair exists at two bands.
-    let pattern = null;
-    const { data: userPattern } = await supabase
-      .from("route_patterns").select("*")
-      .eq("origin_key", originKey).eq("destination_key", destKey)
-      .eq("altitude_band", band).eq("user_id", user.id)
-      .maybeSingle();
-    pattern = userPattern;
+    // ── 6b. Real external data, evaluated per candidate ─────────────────────
+    const flightWindowEnd = departureEnd.getTime() + Math.max(...evals.map((e) => e.timeMin)) * 60_000;
+    const extData = await loadExternal(supabase, departureStart.getTime(), flightWindowEnd);
+    const extEvals: ExternalEvaluation[] = candidates.map((c) => evaluateExternal(
+      c.waypoints.map(([lat, lon]) => ({ lat, lon })), band, departureStart.getTime(), flightWindowEnd, extData));
 
-    if (!pattern) {
-      const { data: fleetPattern } = await supabase
-        .from("route_patterns").select("*")
-        .eq("origin_key", originKey).eq("destination_key", destKey)
-        .eq("altitude_band", band).is("user_id", null)
-        .maybeSingle();
-      pattern = fleetPattern;
-    }
-
-    // ── 7. Score, apply no-fly penalty, apply historical drift ──────────
+    // ── 7. Score, apply no-fly + external-data penalties ────────────────
     const scored = candidates.map((c, i) => {
       const score = scoreEval(evals[i], fastestTime, shortestDist, weights);
       let overall = score.overall;
@@ -402,20 +412,18 @@ serve("route-optimizer", async ({ req, admin: supabase, json, cors: corsHeaders,
       const violatedZone = noFlyZones.length > 0 ? routeIntersectsNoFly(c.waypoints, noFlyZones) : null;
       if (violatedZone) overall = Math.max(0, overall - 50);
 
-      // Historical drift adjustment (user-specific or fleet).
-      if (pattern && (pattern.completed_flight_count ?? 0) >= 2) {
-        const predicted = Number(pattern.avg_overall_score ?? 70);
-        const adjusted = Number(pattern.outcome_adjusted_score ?? predicted);
-        const drift = adjusted - predicted;
-        overall = Math.max(10, Math.min(100, overall + drift * 0.3));
-      }
+      const ext = extEvals[i];
+      overall = Math.max(0, overall - externalPenalty(ext));
 
       return {
         candidate: c,
         evaluation: evals[i],
         score: { ...score, overall: Math.round(overall) },
         distance_km: Math.round(evals[i].distanceKm * 10) / 10,
-        estimated_time_min: Math.round(evals[i].timeMin * 10) / 10,
+        // Calibrated by the promoted duration model (factor 1 until trained).
+        estimated_time_min: Math.round(evals[i].timeMin * durFactor * 10) / 10,
+        raw_estimated_time_min: Math.round(evals[i].timeMin * 10) / 10,
+        external: ext,
         violated_no_fly_zone: violatedZone,
         wind_drift: computeWindDrift(evals[i]),
       };
@@ -428,6 +436,9 @@ serve("route-optimizer", async ({ req, admin: supabase, json, cors: corsHeaders,
       const e = s.evaluation;
       const bits: string[] = [];
       if (s.violated_no_fly_zone) bits.push(`⚠ Passes through restricted zone: ${s.violated_no_fly_zone}`);
+      for (const r of s.external.restrictions) bits.push(`⚠ Enters active FAA TFR ${r.notam}${r.name ? ` (${r.name})` : ""}`);
+      for (const a of s.external.advisories.filter((x) => x.severity !== "low")) bits.push(`${a.kind} ${a.hazard ?? ""}`.trim());
+      if (s.external.live_traffic.hits.length) bits.push(`${s.external.live_traffic.hits.length} live ADS-B aircraft near route`);
       if (e.avgHeadwindKmh > 8) bits.push(`headwind ~${Math.round(e.avgHeadwindKmh)} km/h`);
       else if (e.avgHeadwindKmh < -8) bits.push(`tailwind ~${Math.round(-e.avgHeadwindKmh)} km/h`);
       if (e.avgCrosswindKmh > 15) bits.push(`crosswind ~${Math.round(e.avgCrosswindKmh)} km/h`);
@@ -445,6 +456,8 @@ serve("route-optimizer", async ({ req, admin: supabase, json, cors: corsHeaders,
       waypoints: s.candidate.waypoints.map(([lat, lon]) => ({ lat, lon })),
       distance_km: s.distance_km,
       estimated_time_min: s.estimated_time_min,
+      raw_estimated_time_min: s.raw_estimated_time_min,
+      duration_calibration_factor: durFactor,
       overall_score: s.score.overall,
       safety_score: s.score.safety,
       weather_score: s.score.weather,
@@ -456,6 +469,9 @@ serve("route-optimizer", async ({ req, admin: supabase, json, cors: corsHeaders,
       fuel_score: s.score.fuel,
       wind_drift: s.wind_drift,
       violated_no_fly_zone: s.violated_no_fly_zone,
+      airspace_restrictions: s.external.restrictions,
+      weather_advisories: s.external.advisories,
+      live_traffic: s.external.live_traffic.hits,
       wind_summary: {
         avg_headwind_kmh: Math.round(s.evaluation.avgHeadwindKmh),
         avg_crosswind_kmh: Math.round(s.evaluation.avgCrosswindKmh),
@@ -513,6 +529,7 @@ serve("route-optimizer", async ({ req, admin: supabase, json, cors: corsHeaders,
         weather_risk: weatherRisk,
         selection_reason: primaryRoute.operational_note,
         status: "active",
+        model_versions: modelVersions,
       })
       .select("id")
       .single();
@@ -533,20 +550,19 @@ serve("route-optimizer", async ({ req, admin: supabase, json, cors: corsHeaders,
     ]);
     for (const u of upserts) if (u.error) console.error("[route-optimizer] upsert_route_pattern failed", u.error.message);
 
-    const historicalSuggestion = pattern && pattern.flight_count >= 2
+    const historicalSuggestion = routeStats
       ? {
           found: true,
-          is_user_specific: pattern.user_id != null,
-          flight_count: pattern.flight_count,
-          completed_flight_count: pattern.completed_flight_count ?? 0,
-          avg_score: Math.round(Number(pattern.avg_overall_score ?? 0)),
-          outcome_adjusted_score: pattern.outcome_adjusted_score ? Math.round(Number(pattern.outcome_adjusted_score)) : null,
-          message: (pattern.completed_flight_count ?? 0) >= 2
-            ? `Flown ${pattern.flight_count} times · ${pattern.completed_flight_count} completed. Outcome-adjusted: ${Math.round(Number(pattern.outcome_adjusted_score ?? pattern.avg_overall_score))}.`
-            : `Flown ${pattern.flight_count} times. Avg planning score: ${Math.round(Number(pattern.avg_overall_score ?? 0))}.`,
+          source: "verified_past_flights",
+          model_version: models.route_stats?.version ?? null,
+          verified_flights: routeStats.verified_flights,
+          median_duration_min: routeStats.median_duration_min,
+          median_deviation_m: routeStats.median_deviation_m,
+          message: `${routeStats.verified_flights} GPS-verified flight(s) on this route · median ${routeStats.median_duration_min} min.`,
         }
-      : { found: false };
+      : { found: false, message: "No GPS-verified flights on this route yet." };
 
+    const primaryExt = top3[0]?.external;
     return json({
       route_id: savedRoute.id,
       top_routes: routes,
@@ -559,6 +575,9 @@ serve("route-optimizer", async ({ req, admin: supabase, json, cors: corsHeaders,
       historical_suggestion: historicalSuggestion,
       // Traceable conflict-check result (honest status: checked_clear vs
       // conflicts vs incomplete; never a fabricated "all clear").
+      external_data: primaryExt?.data_status ?? null,
+      live_traffic: primaryExt?.live_traffic ?? null,
+      model_versions: modelVersions,
       conflict_check: {
         status: conflictResult.status,
         evaluated_flights: conflictResult.evaluatedCount,

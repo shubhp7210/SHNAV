@@ -36,6 +36,9 @@ no rate limiting (table missing), no background jobs. Everything below ships wit
    `verify-production.mjs` (fails the run if production isn't hardened).
 4. Deploy the **frontend after** the backend (it relies on the new columns and functions).
 5. Turn on alert delivery (§4) and spend alarms (§5).
+6. Data platform (2026-11-15) — see §8. **Before** merging, run the read-only audit and keep the
+   export as a backup: `DATABASE_URL=$SUPABASE_DB_URL node scripts/audit-data.mjs --out audit-before.md --export audit-export/`.
+   After the deploy, enable scheduled ingestion (§8.1) and re-run the audit.
 
 ## 2. Rollback
 
@@ -106,7 +109,14 @@ holds the daily limits. Tune them with:
 | `shnav-expire-stale-intents` | every 5 min | Expires abandoned intents and frees their slots |
 | `shnav-check-alerts` | every 5 min | Raises and delivers alerts |
 | `shnav-prune` | hourly :07 | Rate-limit windows >1 day, errors >30 days, stale negative geocodes |
-| `shnav-refresh-patterns` | 03:15 daily | Fleet route-pattern refresh + safety weight adjustment |
+| `shnav-refresh-patterns` | 03:15 daily | Fleet route-pattern refresh (planning statistics only; no weight changes since 2026-11-15) |
+| `shnav-ingest-dispatch` | every minute | Calls `data-ingest` (pg_net) with the sources that are due |
+| `shnav-finalize-flights` | every 5 min | Moves ended flights from active (`flight_intents`) to `past_flights` |
+| `shnav-pair-verification` | every 15 min | Pairs Open-Meteo snapshots with METARs (`wx_verification`) |
+| `shnav-reconcile` | every 30 min | Predicted vs observed per past flight, evidence-based corrections |
+| `shnav-learning-cycle` | 04:30 daily | Reconcile → train (as-of, holdout gate) → user pattern detection |
+| `shnav-integrity` | hourly :20 | Integrity checks → `integrity_check_results` + alerts on failure |
+| `shnav-prune-ingest` | 03:40 daily | Raw ADS-B >14 days, ingest runs >30 days |
 
 Jobs run inside Postgres, so they never block requests. Manual pattern refresh: POST
 `/functions/v1/background-analyzer` with `X-Internal-Secret`.
@@ -120,4 +130,49 @@ Jobs run inside Postgres, so they never block requests. Manual pattern refresh: 
 | 3D terrain/buildings | Cesium ion | Free tier is non-commercial ("Upgrade for commercial use" credit) |
 | Basemap | Esri World Dark Gray (keyless) | Commercial use needs an ArcGIS account |
 | Vertiports | FAA-registered sites (JRB, 6N5, JRA, JFK, LGA, EWR) | Hourly capacities are **configured planning values**. No public data exists |
-| Airspace restrictions | `airspace_segments` (static) | **Not** live FAA TFRs, so it isn't suitable for real operations |
+| Airspace restrictions | FAA TFR list + XNOTAM detail (`tfr.faa.gov`), NY/NJ/CT/PA, region-filtered | Public domain. NOTAMs other than TFRs are **not** ingested (the FAA NOTAM API needs a key) |
+| Aviation weather | aviationweather.gov METAR/TAF/SIGMET/G-AIRMET, api.weather.gov alerts | Public domain. Identify with a User-Agent; stay well under 100 req/min |
+| Live traffic | OpenSky Network ADS-B (NYC box) | Non-commercial research terms. Anonymous = 400 credits/day; fetched only while flights operate |
+
+## 8. Data platform (2026-11-15)
+
+**What it is.** Real observations are ingested on a schedule into append-only tables
+(`wx_metar`, `wx_taf`, `wx_advisories`, `airspace_restrictions`, `traffic_observations`,
+`wx_forecast_snapshots`), validated (`quality` = ok / suspect / rejected), deduplicated by content
+hash, and tracked per source (`data_sources`, `ingest_runs`, `data_source_status`). Active flights
+stay in `flight_intents`; a flight moves to the self-contained, append-only `past_flights` only once its
+end is confirmed (landing + GPS settle, expiry, or 45 min of silence). Only GPS telemetry received
+server-side (`flight-telemetry` → `flight_telemetry`) can make a past flight **verified**.
+
+**Past data cannot influence a new flight directly.** The service role, which every planning
+function uses, has **no privileges** on `past_flights`, `prediction_errors`, `wx_verification` or
+`record_corrections`. Planning reads only the active, versioned `model_params`. Those are trained nightly from data known
+*as of* the training time, with a time-ordered holdout, and promoted only if they beat the active
+model by ≥2%. Every version is kept: roll back with
+`UPDATE model_params SET status='retired' WHERE kind=… AND status='active'; UPDATE model_params SET status='active', retired_at=NULL WHERE kind=… AND version=…;`
+
+**Corrections** go through `apply_correction()`, which writes the original value, the corrected
+value, the reason and the evidence to `record_corrections`. `past_flights` rows cannot be updated
+any other way, and cannot be deleted.
+
+### 8.1 Enable scheduled ingestion (one time, after deploy)
+
+```sql
+INSERT INTO app_private.settings (key, value) VALUES
+  ('functions_base_url', 'https://jiagegvlehrawpxcrwsd.supabase.co/functions/v1'),
+  ('internal_function_secret', '<same value as INTERNAL_FUNCTION_SECRET>')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+```
+
+Optional function secrets: `supabase secrets set OPENSKY_CLIENT_ID=… OPENSKY_CLIENT_SECRET=…`
+(then `UPDATE api_budgets SET daily_limit = 3800 WHERE service = 'opensky';`), and
+`TFR_STATES=NY,NJ,CT,PA` to change the TFR state filter.
+
+Manual run / backfill: `curl -X POST …/functions/v1/data-ingest -H "X-Internal-Secret: …" -d '{"sources":["awc-metar"],"force":true}'`.
+
+### 8.2 Health
+
+- `SELECT * FROM data_source_status;` shows freshness per source (fresh / degraded / stale / never).
+- `SELECT * FROM integrity_check_results ORDER BY run_at DESC LIMIT 20;` shows the latest integrity checks.
+- `SELECT kind, version, status, n_train, metrics FROM model_params ORDER BY kind, version;` shows model history.
+- `node scripts/audit-data.mjs` gives a full read-only audit at any time (exit code 1 if anything is critical).

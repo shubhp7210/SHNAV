@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:db": "node --test supabase/tests/sql.test.mjs",
+    "test:db": "node --test supabase/tests/sql.test.mjs supabase/tests/data_platform.test.mjs",
     "verify:prod": "node scripts/verify-production.mjs"
   },
   "dependencies": {

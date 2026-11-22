@@ -41,3 +41,10 @@ verify_jwt = true
 # still passes for signed-out visitors; the function rate-limits per user/IP.
 [functions.log-client-error]
 verify_jwt = true
+
+# Server-to-server: invoked by pg_cron/pg_net with X-Internal-Secret (no JWT).
+[functions.data-ingest]
+verify_jwt = false
+
+[functions.flight-telemetry]
+verify_jwt = true

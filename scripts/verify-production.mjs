@@ -9,25 +9,28 @@ const ORIGIN = process.env.ALLOWED_ORIGIN;
 if (!URL_ || !KEY) { console.error("SUPABASE_URL and SUPABASE_ANON_KEY are required"); process.exit(2); }
 
 const FUNCTIONS = ["trajectory-analysis", "route-optimizer", "flight-decision-engine", "airspace-scheduler",
-  "vertiport-coordinator", "trajectory-predictor", "weather-intelligence", "record-flight-outcome"];
+  "vertiport-coordinator", "trajectory-predictor", "weather-intelligence", "record-flight-outcome", "flight-telemetry"];
 const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok, detail }); console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`); };
 const rest = (path, init = {}) => fetch(`${URL_}/rest/v1/${path}`, { ...init, headers: { apikey: KEY, "Content-Type": "application/json", ...(init.headers ?? {}) } });
 
 // 1. Migration applied: anon must be DENIED (permission), not "table not found".
-for (const t of ["rate_limits", "error_events", "api_usage", "geocode_cache"]) {
+for (const t of ["rate_limits", "error_events", "api_usage", "geocode_cache",
+  // 2026-11-15 data platform: observations need sign-in; ops/learning tables are private.
+  "data_sources", "ingest_runs", "model_params", "record_corrections", "wx_verification", "wx_metar", "traffic_observations"]) {
   const r = await rest(`${t}?select=*&limit=1`);
   const body = await r.text();
   check(`table ${t} exists and is private`, r.status === 401 || r.status === 403 || /permission denied/i.test(body), `${r.status} ${body.slice(0, 80)}`);
 }
 // 2. Privileged RPCs refuse the anon role.
-for (const fn of ["check_rate_limit", "reserve_airspace_slot", "record_flight_outcome_tx", "expire_stale_intents"]) {
+for (const fn of ["check_rate_limit", "reserve_airspace_slot", "record_flight_outcome_tx", "expire_stale_intents",
+  "ingest_claim", "ingest_telemetry", "finalize_flight", "apply_correction", "run_learning_cycle", "train_duration_calibration"]) {
   const r = await rest(`rpc/${fn}`, { method: "POST", body: "{}" });
   const body = await r.text();
   check(`rpc ${fn} denied to anon`, r.status === 401 || r.status === 403 || /permission denied/i.test(body), `${r.status} ${body.slice(0, 80)}`);
 }
 // 3. Anonymous reads of user data return nothing (RLS).
-for (const t of ["flight_intents", "flight_decisions", "routes", "historical_flights"]) {
+for (const t of ["flight_intents", "flight_decisions", "routes", "historical_flights", "past_flights", "user_pattern_flags", "flight_telemetry"]) {
   const r = await rest(`${t}?select=id&limit=1`);
   const rows = r.ok ? await r.json() : [];
   check(`RLS hides ${t} from anon`, Array.isArray(rows) && rows.length === 0, `${r.status}`);
@@ -43,6 +46,11 @@ for (const fn of FUNCTIONS) {
   const r = await fetch(`${URL_}/functions/v1/${fn}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
   const body = await r.text();
   check(`${fn} rejects unauthenticated calls`, r.status === 401, `${r.status} ${body.slice(0, 60)}`);
+}
+// 5b. The ingestion endpoint is server-to-server only: no secret → 403.
+{
+  const r = await fetch(`${URL_}/functions/v1/data-ingest`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  check("data-ingest refuses calls without the internal secret", r.status === 403, `${r.status}`);
 }
 // 6. CORS is not wildcard and echoes only the allowed origin.
 {

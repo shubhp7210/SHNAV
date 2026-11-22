@@ -295,6 +295,232 @@ export type Database = {
         }
         Relationships: []
       }
+      past_flights: {
+        Row: {
+          id: string
+          flight_intent_id: string
+          user_id: string | null
+          aircraft_id: string
+          operator_name: string | null
+          origin: string
+          destination: string
+          origin_lat: number | null
+          origin_lon: number | null
+          dest_lat: number | null
+          dest_lon: number | null
+          altitude_band: string | null
+          filed_at: string | null
+          planned_departure_start: string | null
+          planned_departure_end: string | null
+          final_status: string
+          verification_status: string
+          verification_notes: string[]
+          telemetry_source: string
+          telemetry_points: number
+          actual_departure_at: string | null
+          actual_arrival_at: string | null
+          actual_duration_min: number | null
+          max_deviation_m: number | null
+          end_distance_to_dest_m: number | null
+          track_summary: Json | null
+          planned_route: Json | null
+          planned_duration_min: number | null
+          prediction_snapshot: Json | null
+          outcome_reported: Json | null
+          weather_observed: Json | null
+          weather_obs_status: string
+          analysis: Json | null
+          reconciled_at: string | null
+          learning_excluded: boolean
+          learning_exclusion_reason: string | null
+          archived_at: string
+          available_at: string
+        }
+        Insert: {
+          [_ in never]: never
+        }
+        Update: {
+          [_ in never]: never
+        }
+        Relationships: []
+      }
+      prediction_errors: {
+        Row: {
+          id: number
+          past_flight_id: string
+          kind: string
+          predicted: Json | null
+          observed: Json | null
+          error: number | null
+          verified: boolean
+          detail: string | null
+          created_at: string
+        }
+        Insert: {
+          [_ in never]: never
+        }
+        Update: {
+          [_ in never]: never
+        }
+        Relationships: []
+      }
+      user_pattern_flags: {
+        Row: {
+          id: string
+          user_id: string
+          pattern: string
+          status: string
+          summary: string
+          evidence: Json
+          sample_size: number
+          effect: number | null
+          detected_at: string
+          updated_at: string
+          responded_at: string | null
+          response_note: string | null
+        }
+        Insert: {
+          [_ in never]: never
+        }
+        Update: {
+          [_ in never]: never
+        }
+        Relationships: []
+      }
+      airspace_restrictions: {
+        Row: {
+          id: number
+          source_id: string
+          external_id: string
+          kind: string
+          restriction_type: string | null
+          name: string | null
+          state: string | null
+          facility: string | null
+          valid_from: string | null
+          valid_to: string | null
+          alt_low_ft: number | null
+          alt_high_ft: number | null
+          areas: Json
+          description: string | null
+          quality: string
+          quality_flags: string[]
+          fetched_at: string
+          last_seen_at: string
+          withdrawn_at: string | null
+          content_hash: string
+        }
+        Insert: {
+          [_ in never]: never
+        }
+        Update: {
+          [_ in never]: never
+        }
+        Relationships: []
+      }
+      traffic_observations: {
+        Row: {
+          id: number
+          source_id: string
+          icao24: string
+          callsign: string | null
+          origin_country: string | null
+          observed_at: string
+          lat: number
+          lon: number
+          baro_alt_m: number | null
+          geo_alt_m: number | null
+          on_ground: boolean
+          velocity_ms: number | null
+          track_deg: number | null
+          vertical_rate_ms: number | null
+          squawk: string | null
+          category: number | null
+          quality: string
+          quality_flags: string[]
+          fetched_at: string
+        }
+        Insert: {
+          [_ in never]: never
+        }
+        Update: {
+          [_ in never]: never
+        }
+        Relationships: []
+      }
+      wx_metar: {
+        Row: {
+          id: number
+          station: string
+          obs_time: string
+          lat: number
+          lon: number
+          wind_dir_deg: number | null
+          wind_variable: boolean
+          wind_kt: number | null
+          gust_kt: number | null
+          visibility_sm: number | null
+          temp_c: number | null
+          flight_category: string | null
+          wx_string: string | null
+          raw: string
+          quality: string
+          quality_flags: string[]
+          fetched_at: string
+        }
+        Insert: {
+          [_ in never]: never
+        }
+        Update: {
+          [_ in never]: never
+        }
+        Relationships: []
+      }
+      wx_advisories: {
+        Row: {
+          id: number
+          source_id: string
+          kind: string
+          external_id: string
+          hazard: string | null
+          severity: string | null
+          valid_from: string
+          valid_to: string
+          alt_low_ft: number | null
+          alt_high_ft: number | null
+          geometry_type: string
+          polygon: Json | null
+          headline: string | null
+          quality: string
+          fetched_at: string
+        }
+        Insert: {
+          [_ in never]: never
+        }
+        Update: {
+          [_ in never]: never
+        }
+        Relationships: []
+      }
+      flight_telemetry: {
+        Row: {
+          id: number
+          flight_intent_id: string
+          user_id: string
+          recorded_at: string
+          lat: number
+          lon: number
+          accuracy_m: number | null
+          quality: string
+        }
+        Insert: {
+          [_ in never]: never
+        }
+        Update: {
+          [_ in never]: never
+        }
+        Relationships: []
+      }
       historical_flights: {
         Row: {
           aircraft_id: string
@@ -718,10 +944,54 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      data_source_status: {
+        Row: {
+          id: string
+          name: string
+          kind: string
+          cadence_seconds: number | null
+          reliability: number
+          run_condition: string
+          enabled: boolean
+          licence: string | null
+          last_success_at: string | null
+          last_data_at: string | null
+          consecutive_failures: number
+          freshness: string
+        }
+        Relationships: []
+      }
+      airspace_restrictions_current: {
+        Row: {
+          id: number
+          source_id: string
+          external_id: string
+          kind: string
+          restriction_type: string | null
+          name: string | null
+          state: string | null
+          facility: string | null
+          valid_from: string | null
+          valid_to: string | null
+          alt_low_ft: number | null
+          alt_high_ft: number | null
+          areas: Json
+          description: string | null
+          quality: string
+          quality_flags: string[]
+          fetched_at: string
+          last_seen_at: string
+          withdrawn_at: string | null
+          content_hash: string
+        }
+        Relationships: []
+      }
     }
     Functions: {
-      [_ in never]: never
+      respond_pattern_flag: {
+        Args: { p_flag: string; p_response: string; p_note?: string }
+        Returns: Json
+      }
     }
     Enums: {
       [_ in never]: never

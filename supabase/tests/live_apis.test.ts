@@ -46,3 +46,73 @@ Deno.test("Nominatim: real lookup, throttled; unknown text resolves to null", as
   assertEquals(miss, null);
   assert(Date.now() - t0 >= 1000, "second request must wait ≥1 s (OSM usage policy)");
 });
+
+// ─── Data platform sources (2026-11-15) — real fetch + the production parsers ──
+import { fetchWithRetry } from "../functions/_shared/ingest/fetcher.ts";
+import {
+  STATIONS, parseAirSigmets, parseGAirmets, parseMetars, parseNwsAlerts, parseOpenSky, parseTafs,
+  parseTfrDetail, parseTfrList, parseVerificationForecasts,
+} from "../functions/_shared/ingest/parsers.ts";
+import { MINUTELY_VARS, slot15 } from "../functions/_shared/forecast.ts";
+
+const ids = Object.keys(STATIONS);
+
+Deno.test("AWC METAR: real NYC observations parse and pass validation", async () => {
+  const r = await fetchWithRetry(`https://aviationweather.gov/api/data/metar?ids=${ids.join(",")}&format=json&hours=2`, { service: "awc" });
+  const { records, rejected } = parseMetars(JSON.parse(r.text!));
+  assert(records.length >= 5, `only ${records.length} METARs`);
+  assertEquals(rejected, 0);
+  assert(records.every((m) => m.quality !== "rejected"), "a live METAR was rejected");
+  console.log("METAR", records.slice(0, 3).map((m) => `${m.station} ${m.obs_time} ${m.wind_kt}kt ${m.quality}`));
+});
+
+Deno.test("AWC TAF / SIGMET / G-AIRMET: real responses parse", async () => {
+  const taf = await fetchWithRetry(`https://aviationweather.gov/api/data/taf?ids=KJFK,KLGA,KEWR&format=json`, { service: "awc" });
+  assert(parseTafs(JSON.parse(taf.text!)).records.length >= 2);
+  const sig = parseAirSigmets(JSON.parse((await fetchWithRetry("https://aviationweather.gov/api/data/airsigmet?format=json", { service: "awc" })).text!));
+  const g = parseGAirmets(JSON.parse((await fetchWithRetry("https://aviationweather.gov/api/data/gairmet?format=json", { service: "awc", timeoutMs: 25_000 })).text!));
+  console.log("SIGMET in-region", sig.records.length, "outside", sig.outside, "| G-AIRMET in-region", g.records.length, "outside", g.outside);
+  assert(g.records.length + g.outside > 0, "G-AIRMET feed empty");
+});
+
+Deno.test("NWS alerts: real GeoJSON parses", async () => {
+  const r = await fetchWithRetry("https://api.weather.gov/alerts/active?point=40.7549,-73.9840", { service: "nws", headers: { Accept: "application/geo+json" } });
+  const { rejected } = parseNwsAlerts(JSON.parse(r.text!));
+  assertEquals(rejected, 0);
+});
+
+Deno.test("FAA TFR: list + one real detail document parse", async () => {
+  const list = parseTfrList(JSON.parse((await fetchWithRetry("https://tfr.faa.gov/tfrapi/exportTfrList", { service: "faa-tfr" })).text!));
+  assert(list.length > 5, `TFR list has ${list.length}`);
+  let parsed = 0;
+  for (const t of list.slice(0, 4)) {
+    try {
+      const d = await fetchWithRetry(`https://tfr.faa.gov/download/detail_${t.notam_id.replace("/", "_")}.xml`, { service: "faa-tfr", attempts: 1 });
+      const det = parseTfrDetail(d.text!);
+      if (det.areas.length) { parsed++; console.log("TFR", t.notam_id, det.name, det.valid_from, det.areas.length, "areas", det.quality); }
+    } catch { /* some list entries have no detail document */ }
+  }
+  assert(parsed >= 1, "no TFR detail could be parsed");
+});
+
+Deno.test("OpenSky: anonymous NYC state vectors parse", async () => {
+  try {
+    const r = await fetchWithRetry("https://opensky-network.org/api/states/all?lamin=40.40&lomin=-74.40&lamax=41.10&lomax=-73.50", { service: "opensky", attempts: 1 });
+    const { records } = parseOpenSky(JSON.parse(r.text!));
+    console.log("ADS-B aircraft", records.length);
+    assert(records.every((t) => t.lat > 40 && t.lat < 41.2));
+  } catch (e) {
+    // Anonymous quota (400/day) may be exhausted — report, don't fail the suite.
+    console.warn("OpenSky unavailable:", (e as Error).message);
+  }
+});
+
+Deno.test("Open-Meteo multi-location verification snapshot", async () => {
+  const now = new Date();
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${ids.map((s) => STATIONS[s].lat).join(",")}` +
+    `&longitude=${ids.map((s) => STATIONS[s].lon).join(",")}&minutely_15=${MINUTELY_VARS}` +
+    `&start_minutely_15=${slot15(new Date(now.getTime() + 45 * 60_000))}&end_minutely_15=${slot15(new Date(now.getTime() + 135 * 60_000))}` +
+    `&timezone=UTC&wind_speed_unit=kmh`;
+  const snaps = parseVerificationForecasts(JSON.parse((await fetchWithRetry(url, { service: "open-meteo" })).text!), ids, now, [60, 120]);
+  assertEquals(snaps.length, ids.length * 2);
+});

@@ -14,6 +14,7 @@ import { fetchForecastPoints, computeRisk, riskLevel, weatherCodeToDescription }
 import { pointAt, type WxPoint } from "../_shared/forecast.ts";
 import { EVTOL_BASE_SPEED_KMH } from "../_shared/constants.ts";
 import { haversineKm } from "../_shared/geo.ts";
+import { crossCheckForecast, type MetarObs } from "../_shared/airspace.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const risk = (p: WxPoint) => computeRisk(p.windSpeedKmh, p.windGustsKmh, p.precipitationMm, p.weatherCode);
@@ -63,9 +64,22 @@ serve("weather-intelligence", async ({ req, admin, json, cors, setUser }) => {
   const dest = d ? pointAt(dPts, arriveAt) : null;
   if (!now) return json({ error: "weather_unavailable", reason: "Open-Meteo forecast unavailable for the departure time" }, 503);
 
+  // Cross-reference: the forecast for a departure within the hour is checked
+  // against the nearest real METAR (never one from after now, never >90 min old).
+  const { data: metarRows } = await admin.rpc("nearest_metar", { p_lat: o.lat, p_lon: o.lon });
+  const metar = ((metarRows ?? []) as MetarObs[])[0] ?? null;
+  const cross = crossCheckForecast({ windKmh: now.windSpeedKmh, gustKmh: now.windGustsKmh, validAtMs: Date.parse(now.time) }, metar, Date.now());
+
   // Higher bands see stronger wind; risk is scaled (documented, not hidden).
   const altitudeMultiplier = band === "high" ? 1.3 : band === "mid" ? 1.15 : 1.0;
-  const base = risk(now);
+  let base = risk(now);
+  // When forecast and observation disagree for an imminent departure, use the
+  // worse of the two (conservative) and say so.
+  let observationOverride = false;
+  if (cross.status === "disagree" && cross.observation?.wind_kmh != null) {
+    const obsRisk = computeRisk(cross.observation.wind_kmh, cross.observation.gust_kmh ?? cross.observation.wind_kmh, now.precipitationMm, now.weatherCode);
+    if (obsRisk > base) { base = obsRisk; observationOverride = true; }
+  }
   const scaled = (r: number) => Math.min(100, Math.round(r * altitudeMultiplier));
   const r0 = scaled(base);
   const r15 = p15 ? scaled(risk(p15)) : r0;
@@ -84,9 +98,13 @@ serve("weather-intelligence", async ({ req, admin, json, cors, setUser }) => {
     else reason = `Moderate risk (${r0}/100), stable — proceed with caution.`;
   }
 
+  if (observationOverride) reason += " Risk raised to match the nearest METAR, which disagrees with the forecast.";
+
   return json({
     data_status: "live",
     source: "open-meteo minutely_15",
+    cross_check: cross,
+    observation_override: observationOverride,
     valid_at: now.time,
     origin_weather: {
       wind_speed: Math.round(now.windSpeedKmh),

@@ -74,9 +74,16 @@ export default function Privacy() {
                 decision outputs, detected anomalies, and flight outcomes.
               </li>
               <li>
-                <span className="text-foreground">Derived performance data</span> — aggregate
-                patterns and an operator error/confidence profile computed from your own flight
-                history to improve recommendations for your account.
+                <span className="text-foreground">Flight telemetry</span> — while a flight is being
+                tracked and your browser shares its location, GPS fixes (time, position, accuracy,
+                speed, heading) are sent to verify the flight. Simulated flights send no location.
+              </li>
+              <li>
+                <span className="text-foreground">Derived data</span> — predicted-vs-observed
+                comparisons for your ended flights, and suspected recurring input patterns (for
+                example, consistently departing after the filed window). Patterns are shown to you
+                with their evidence and only affect guidance if you confirm them; you can dismiss or
+                withdraw them at any time.
               </li>
             </ul>
             <p>
@@ -123,6 +130,12 @@ export default function Privacy() {
                 <span className="text-foreground">Open-Meteo</span> — weather forecasting. Receives
                 only geographic coordinates (latitude/longitude) for the areas relevant to a flight;
                 it receives no account or identity information.
+              </li>
+              <li>
+                <span className="text-foreground">aviationweather.gov, api.weather.gov, FAA TFR
+                service, OpenSky Network</span> — public aviation weather, restriction and ADS-B
+                traffic data. The service requests fixed New York–area data from them on a schedule;
+                none of your account, flight or location data is sent.
               </li>
               <li>
                 <span className="text-foreground">OpenStreetMap / Nominatim</span> — geocoding of
