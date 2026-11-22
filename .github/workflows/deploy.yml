@@ -100,7 +100,7 @@ jobs:
         run: |
           supabase functions deploy airspace-scheduler background-analyzer flight-decision-engine \
             record-flight-outcome route-optimizer trajectory-analysis trajectory-predictor \
-            vertiport-coordinator weather-intelligence log-client-error data-ingest flight-telemetry
+            vertiport-coordinator weather-intelligence log-client-error data-ingest flight-telemetry ping
 
       - uses: actions/setup-node@v4
         with: { node-version: 22 }

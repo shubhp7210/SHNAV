@@ -176,3 +176,14 @@ Manual run / backfill: `curl -X POST …/functions/v1/data-ingest -H "X-Internal
 - `SELECT * FROM integrity_check_results ORDER BY run_at DESC LIMIT 20;` shows the latest integrity checks.
 - `SELECT kind, version, status, n_train, metrics FROM model_params ORDER BY kind, version;` shows model history.
 - `node scripts/audit-data.mjs` gives a full read-only audit at any time (exit code 1 if anything is critical).
+
+## 9. Admin map and trackers (2026-11-22)
+
+- **Admin site:** `admin/index.html` (see `admin/README.md`). Only users in `public.admins` see data.
+- **Tracker intake:** edge function `ping` (`verify_jwt = false`; the device token is checked in
+  `tracker_ping()`, rate-limited to 120 pings/min per device). A tracker linked to an aircraft ID feeds that
+  pilot's airborne flight through `ingest_telemetry()`. It never feeds another user's flight.
+- **Rollback:** delete or redeploy the `ping` function first, then run
+  `supabase/rollback/20261122000000_admin_tracking.down.sql` (drops trackers and their pings).
+- `verify-production.mjs` checks that `ping` refuses missing and unknown tokens, and that the tracker tables are
+  private to signed-out visitors.
