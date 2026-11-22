@@ -179,9 +179,27 @@ async function start() {
   $("mapDiv").hidden = false;
 
   map = L.map("mapDiv").setView([40.735, -74.33], 13);
-  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-    attribution: "© OpenStreetMap contributors © CARTO", maxZoom: 19,
-  }).addTo(map);
+  // Free basemaps that need no API key (Esri's public tiles + OpenStreetMap).
+  const esri = (svc) => `https://services.arcgisonline.com/ArcGIS/rest/services/${svc}/MapServer/tile/{z}/{y}/{x}`;
+  const esriAttr = "Tiles © Esri, HERE, Garmin, © OpenStreetMap contributors";
+  const basemaps = {
+    "Dark": L.layerGroup([
+      L.tileLayer(esri("Canvas/World_Dark_Gray_Base"), { maxZoom: 16, attribution: esriAttr }),
+      L.tileLayer(esri("Canvas/World_Dark_Gray_Reference"), { maxZoom: 16 }),
+    ]),
+    "Streets": L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19, attribution: "© OpenStreetMap contributors",
+    }),
+    "Satellite": L.layerGroup([
+      L.tileLayer(esri("World_Imagery"), { maxZoom: 19, attribution: "Imagery © Esri, Maxar, Earthstar Geographics" }),
+      L.tileLayer(esri("Reference/World_Boundaries_and_Places"), { maxZoom: 19 }),
+    ]),
+  };
+  basemaps["Dark"].addTo(map);
+  L.control.layers(basemaps, null, { position: "topright" }).addTo(map);
+  // The map container was hidden until now; let Leaflet re-measure so no area stays grey.
+  setTimeout(() => map.invalidateSize(), 0);
+  window.addEventListener("resize", () => map.invalidateSize());
   overlay = L.layerGroup().addTo(map);
 
   document.querySelectorAll("#tabs button").forEach((b) => b.onclick = () => {
