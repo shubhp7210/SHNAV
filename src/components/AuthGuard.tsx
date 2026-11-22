@@ -2,11 +2,14 @@ import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 
-// Auth bypass is dev-only. In production builds (vite build) this resolves
-// to `false`, so the guard always enforces a real session. To opt out in dev,
-// run with `VITE_BYPASS_AUTH=false npm run dev`.
+// Sign-in is required everywhere by default — including `npm run dev`.
+// For UI work without an account you can opt in to a bypass in dev only:
+//   VITE_BYPASS_AUTH=true npm run dev
+// Production builds (vite build) always enforce a real session.
+// (Previously the bypass was ON by default in dev, so anyone who could reach
+// the dev server saw the signed-in pages.)
 export const BYPASS_AUTH =
-  import.meta.env.DEV && import.meta.env.VITE_BYPASS_AUTH !== "false";
+  import.meta.env.DEV && import.meta.env.VITE_BYPASS_AUTH === "true";
 
 export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const { session, loading } = useAuth();

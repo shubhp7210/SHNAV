@@ -157,6 +157,9 @@ any other way, and cannot be deleted.
 
 ### 8.1 Enable scheduled ingestion (one time, after deploy)
 
+The deploy workflow now writes both settings on every deploy (step "Ingestion settings"), using the
+`INTERNAL_FUNCTION_SECRET` GitHub secret. Without a working deploy, set them by hand:
+
 ```sql
 INSERT INTO app_private.settings (key, value) VALUES
   ('functions_base_url', 'https://jiagegvlehrawpxcrwsd.supabase.co/functions/v1'),
@@ -176,3 +179,26 @@ Manual run / backfill: `curl -X POST …/functions/v1/data-ingest -H "X-Internal
 - `SELECT * FROM integrity_check_results ORDER BY run_at DESC LIMIT 20;` shows the latest integrity checks.
 - `SELECT kind, version, status, n_train, metrics FROM model_params ORDER BY kind, version;` shows model history.
 - `node scripts/audit-data.mjs` gives a full read-only audit at any time (exit code 1 if anything is critical).
+
+## 9. Admin map and trackers (2026-11-22)
+
+- **Admin site:** `npm run admin` → http://localhost:8090 (separate from the app on :8080). See `admin/README.md`.
+- **Who gets in:** `public.is_admin()` requires an account in `public.admins` **and** a session opened with an
+  emailed sign-in link/code in the last 24 h. Password sessions never get admin data, so editing the page doesn't help.
+- **Tracker intake:** edge function `ping` (`verify_jwt = false`, because devices aren't users). The device token is
+  checked in `tracker_ping()`, which allows 120 pings/min per device. A tracker linked to an aircraft ID feeds that
+  pilot's airborne flight through `ingest_telemetry()` (`flight_telemetry.source = 'tracker'`), and the pilot's
+  flight screen shows it live. A tracker never feeds another user's flight.
+- **Rollback:** delete or redeploy the `ping` function first, then run
+  `supabase/rollback/20261122000000_admin_tracking.down.sql` (drops trackers and their pings).
+
+## 10. Security hardening (2026-11-22)
+
+- `data_source_status` now runs with the caller's rights, and signed-in users can read only the harmless columns of
+  `data_sources`. Eight helper functions have a fixed `search_path`.
+- Reviewed and left as-is: `respond_pattern_flag` (callable by signed-in users on purpose; it is scoped to their own
+  rows) and `pg_net` in schema `public` (it can't be moved safely).
+- Local dev: sign-in is required by default (`VITE_BYPASS_AUTH=true` opts out), and the dev server listens only on
+  localhost (`DEV_HOST=::` exposes it to your network on purpose).
+- Every table and view has a plain-English description (`20261122000200_schema_descriptions.sql`), shown in the
+  Supabase Table Editor.

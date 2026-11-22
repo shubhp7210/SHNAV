@@ -511,7 +511,11 @@ export type Database = {
           lat: number
           lon: number
           accuracy_m: number | null
+          speed_ms: number | null
+          heading_deg: number | null
+          altitude_m: number | null
           quality: string
+          source: "phone" | "tracker"
         }
         Insert: {
           [_ in never]: never

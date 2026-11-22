@@ -63,6 +63,11 @@ const StepMonitoring = ({ data, updateData }: Props) => {
   // telemetry can make a past flight "verified"; simulated runs send nothing.
   type Fix = { t: string; lat: number; lon: number; acc: number | null; spd: number | null; hdg: number | null; alt: number | null };
   const fixBufRef = useRef<Fix[]>([]);
+  // When a tracker device is linked to this aircraft (admin map → Trackers → "Link aircraft…"),
+  // its fixes reach the server via the `ping` function and arrive here over Realtime. While they
+  // keep coming, they drive the display and this device's own GPS is not sent (no mixed tracks).
+  const trackerLastMsRef = useRef(0);
+  const [trackerLive, setTrackerLive] = useState(false);
   const flushingRef = useRef(false);
   const lastFixMsRef = useRef(0);
   const flushTelemetry = async () => {
@@ -213,7 +218,24 @@ const StepMonitoring = ({ data, updateData }: Props) => {
     };
 
     takeoffAtRef.current ??= Date.now();
+    // Move the aircraft on screen to a real position (from this device's GPS or a linked tracker).
+    const applyPosition = (lon: number, lat: number, speedMs: number | null, headingDeg: number | null) => {
+      const pos: [number, number] = [lon, lat];
+      const { idx, m } = nearestIdx(pos);
+      setProgress(idx / Math.max(1, pts.length - 1));
+      handleAlert(m > 250 ? "alert" : "nominal");
+      const hdg = headingDeg ?? calcBearing(pos, pts[Math.min(idx + 3, pts.length - 1)]);
+      setHeading(hdg);
+      setSpeedKmh((speedMs ?? 0) * 3.6);
+      setDriftClock(m > 250 ? computeDriftClock(pos, pts[idx], hdg) : null);
+      evaluateAutoPov(hdg, performance.now());
+      lastTsRef.current = Date.now();
+    };
+    const TRACKER_FRESH_MS = 15_000;
+    const trackerActive = () => Date.now() - trackerLastMsRef.current < TRACKER_FRESH_MS;
+
     const onGps = (geo: GeolocationPosition) => {
+      if (trackerActive()) return; // a linked tracker is the source of truth right now
       telemetrySourceRef.current = "gps";
       // ≥1 s apart; the server rejects implausible jumps and future timestamps.
       if (geo.timestamp - lastFixMsRef.current >= 1000) {
@@ -224,17 +246,32 @@ const StepMonitoring = ({ data, updateData }: Props) => {
         });
         if (fixBufRef.current.length >= 20) void flushTelemetry();
       }
-      const pos: [number, number] = [geo.coords.longitude, geo.coords.latitude];
-      const { idx, m } = nearestIdx(pos);
-      setProgress(idx / Math.max(1, pts.length - 1));
-      handleAlert(m > 250 ? "alert" : "nominal");
-      const hdg = geo.coords.heading ?? calcBearing(pos, pts[Math.min(idx + 3, pts.length - 1)]);
-      setHeading(hdg);
-      setSpeedKmh((geo.coords.speed ?? 0) * 3.6);
-      setDriftClock(m > 250 ? computeDriftClock(pos, pts[idx], hdg) : null);
-      evaluateAutoPov(hdg, performance.now());
-      lastTsRef.current = Date.now();
+      applyPosition(geo.coords.longitude, geo.coords.latitude, geo.coords.speed ?? null, geo.coords.heading ?? null);
     };
+
+    // Fixes stored by the server for this flight. Only tracker fixes are used here — this
+    // device's own GPS fixes come back too, and are already on screen.
+    type TelemetryRow = { lat: number; lon: number; speed_ms: number | null; heading_deg: number | null; quality: string; source?: string };
+    const onTrackerFix = (row: TelemetryRow) => {
+      if (row.source !== "tracker" || row.quality === "rejected") return;
+      trackerLastMsRef.current = Date.now();
+      setTrackerLive(true);
+      telemetrySourceRef.current = "gps"; // real, server-verified positions
+      fixBufRef.current = [];             // don't interleave phone GPS with the tracker's track
+      if (animRef.current) { cancelAnimationFrame(animRef.current); animRef.current = null; } // stop any simulation
+      applyPosition(row.lon, row.lat, row.speed_ms, row.heading_deg);
+    };
+    const trackerChannel = data.flightIntentId
+      ? supabase
+          .channel(`tracker-${data.flightIntentId}`)
+          .on(
+            "postgres_changes",
+            { event: "INSERT", schema: "public", table: "flight_telemetry", filter: `flight_intent_id=eq.${data.flightIntentId}` },
+            (payload) => onTrackerFix(payload.new as TelemetryRow),
+          )
+          .subscribe()
+      : null;
+    const trackerStaleTimer = setInterval(() => { if (!trackerActive()) setTrackerLive(false); }, 5_000);
 
     const startSim = () => {
       telemetrySourceRef.current = "sim";
@@ -293,6 +330,8 @@ const StepMonitoring = ({ data, updateData }: Props) => {
 
     return () => {
       clearInterval(flushTimer);
+      clearInterval(trackerStaleTimer);
+      if (trackerChannel) void supabase.removeChannel(trackerChannel);
       void flushTelemetry();
       if (animRef.current) { cancelAnimationFrame(animRef.current); animRef.current = null; }
       if (watchId !== null) navigator.geolocation.clearWatch(watchId);
@@ -485,6 +524,15 @@ const StepMonitoring = ({ data, updateData }: Props) => {
             interactive label="Flight tracking map"
           />
           <div className="absolute inset-0 pointer-events-none map-vignette" />
+
+          {trackerLive && (
+            <div
+              className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 rounded-full border border-success/50 bg-background/80 px-3 py-1 text-xs font-medium text-success backdrop-blur"
+              role="status"
+            >
+              <Radio className="w-3.5 h-3.5" /> Live position from linked tracker
+            </div>
+          )}
 
           <HudOverlay
             heading={heading} speedKmh={speedKmh} windSpeed={windSpeed}

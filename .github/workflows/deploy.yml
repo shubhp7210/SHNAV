@@ -95,12 +95,26 @@ jobs:
             ALLOWED_ORIGINS="${{ secrets.ALLOWED_ORIGINS }}" \
             INTERNAL_FUNCTION_SECRET="${{ secrets.INTERNAL_FUNCTION_SECRET }}"
 
+      # Scheduled ingestion (pg_cron → data-ingest) authenticates with the same secret the
+      # functions check. Keep the database copy in sync with GitHub so they can never drift.
+      - name: Ingestion settings (keeps app_private.settings in sync)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          INTERNAL_FUNCTION_SECRET: ${{ secrets.INTERNAL_FUNCTION_SECRET }}
+        run: |
+          /usr/lib/postgresql/17/bin/psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -q \
+            -v secret="$INTERNAL_FUNCTION_SECRET" -v base="https://${PROJECT_ID}.supabase.co/functions/v1" <<'SQL'
+          INSERT INTO app_private.settings (key, value) VALUES
+            ('functions_base_url', :'base'), ('internal_function_secret', :'secret')
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+          SQL
+
       # Per-function verify_jwt comes from supabase/config.toml — never pass --no-verify-jwt.
       - name: Deploy edge functions
         run: |
           supabase functions deploy airspace-scheduler background-analyzer flight-decision-engine \
             record-flight-outcome route-optimizer trajectory-analysis trajectory-predictor \
-            vertiport-coordinator weather-intelligence log-client-error data-ingest flight-telemetry
+            vertiport-coordinator weather-intelligence log-client-error data-ingest flight-telemetry ping
 
       - uses: actions/setup-node@v4
         with: { node-version: 22 }

@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SHNAV Flight Admin</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e8ee; --muted:#8a91a0; --green:#3ecf8e; --amber:#f5a524; --red:#f0506e; --blue:#4c8dff; }
+  * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
+  body { margin:0; font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); height:100vh; display:flex; }
+  button { font:inherit; cursor:pointer; border:1px solid var(--line); background:#222733; color:var(--text); border-radius:6px; padding:5px 10px; font-size:12px; }
+  button:hover { border-color:var(--muted); }
+  button.primary { background:var(--green); color:#062b1b; border-color:var(--green); font-weight:600; }
+  button.danger { color:var(--red); }
+  input { font:inherit; background:#0f1115; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px 10px; width:100%; }
+  #login { margin:auto; width:300px; display:flex; flex-direction:column; gap:10px; background:var(--panel); padding:28px; border-radius:12px; border:1px solid var(--line); }
+  #login h2 { margin:0 0 6px; font-size:18px; }
+  #err { color:var(--red); font-size:13px; min-height:16px; margin:0; }
+  #login form { display:flex; flex-direction:column; gap:10px; margin:0; }
+  #login .hint { color:var(--muted); font-size:13px; margin:0; line-height:1.4; }
+  #code { font-family:ui-monospace, monospace; font-size:20px; letter-spacing:.3em; text-align:center; }
+  #side { width:360px; display:flex; flex-direction:column; border-right:1px solid var(--line); background:var(--panel); }
+  #side header { padding:14px 16px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; }
+  #side header h1 { font-size:15px; margin:0; }
+  #stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; padding:12px 16px; border-bottom:1px solid var(--line); }
+  .stat { background:#0f1115; border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .stat b { display:block; font-size:18px; }
+  .stat span { font-size:11px; color:var(--muted); }
+  #tabs { display:flex; border-bottom:1px solid var(--line); }
+  #tabs button { flex:1; border:none; border-radius:0; background:none; padding:10px; color:var(--muted); border-bottom:2px solid transparent; }
+  #tabs button.on { color:var(--text); border-bottom-color:var(--green); }
+  #list { flex:1; overflow:auto; padding:12px 16px; }
+  .card { border:1px solid var(--line); border-radius:8px; padding:10px; margin-bottom:10px; background:#12151b; }
+  .card.live { border-color:var(--green); }
+  .card .row { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .card .name { font-weight:600; font-size:13px; }
+  .card small { color:var(--muted); font-size:11px; display:block; margin-top:3px; word-break:break-all; }
+  .card .btns { margin-top:8px; display:flex; gap:6px; flex-wrap:wrap; }
+  .pill { font-size:10px; padding:2px 7px; border-radius:20px; border:1px solid var(--line); color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .pill.active { color:var(--green); border-color:var(--green); }
+  .section { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin:14px 0 8px; }
+  .section:first-child { margin-top:0; }
+  .add { display:flex; gap:6px; margin-bottom:12px; }
+  .token { font-family:ui-monospace, monospace; font-size:10px; background:#0f1115; padding:4px 6px; border-radius:4px; margin-top:6px; word-break:break-all; color:var(--amber); }
+  #mapDiv { flex:1; }
+  .empty { color:var(--muted); font-size:12px; padding:6px 0; }
+  .leaflet-popup-content { font-size:12px; }
+</style>
+</head>
+<body>
+  <div id="login">
+    <h2>SHNAV Flight Admin</h2>
+    <form id="stepEmail">
+      <p class="hint">Admin access only. We'll email you a one-time sign-in link (or code).</p>
+      <input id="email" type="email" placeholder="Admin email" autocomplete="username" required>
+      <button class="primary" type="submit" id="sendBtn">Email me a sign-in link</button>
+    </form>
+    <form id="stepCode" hidden>
+      <p class="hint">Check <b id="sentTo"></b>. Click the link in the email (open it in this browser), or type the code if the email shows one. It expires in a few minutes.</p>
+      <input id="code" inputmode="numeric" autocomplete="one-time-code" placeholder="Code" maxlength="10" required>
+      <button class="primary" type="submit" id="verifyBtn">Verify &amp; sign in</button>
+      <button type="button" id="backBtn">Use a different email</button>
+    </form>
+    <p id="err"></p>
+  </div>
+
+  <div id="side" hidden>
+    <header>
+      <h1>✈︎ SHNAV Flight Admin</h1>
+      <button id="logout">Log out</button>
+    </header>
+    <div id="stats">
+      <div class="stat"><b id="sActive">0</b><span>Active now</span></div>
+      <div class="stat"><b id="sPast">0</b><span>Past flights</span></div>
+      <div class="stat"><b id="sVeh">0</b><span>Trackers</span></div>
+    </div>
+    <div id="tabs">
+      <button data-tab="live" class="on">Live</button>
+      <button data-tab="past">History</button>
+      <button data-tab="trackers">Trackers</button>
+    </div>
+    <div id="list"></div>
+  </div>
+  <div id="mapDiv" hidden></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script type="module">
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const SUPABASE_URL = "https://jiagegvlehrawpxcrwsd.supabase.co";
+const SUPABASE_KEY = "sb_publishable_hig881cMPN3Q6KV2oWx1FA_YCoT8o5T"; // public key, safe in browser (RLS protects data)
+const PING_URL = SUPABASE_URL + "/functions/v1/ping";
+
+// Only this email can request a sign-in code. The real lock is in the database: data is only
+// returned when the account is in public.admins AND the session was opened with an email code
+// in the last 24 h (see is_admin()), so editing this page in the browser gets an attacker nothing.
+const ADMIN_EMAIL = "shubh.p7210@gmail.com";
+
+// sessionStorage: closing the tab signs you out.
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  // detectSessionInUrl: the emailed link returns here with the session in the URL.
+  auth: { storage: sessionStorage, persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: "implicit" },
+});
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+const fmt = (t) => t ? new Date(t).toLocaleString() : "—";
+
+let map, overlay, currentTab = "live", me = null;
+const markers = {};          // key -> Leaflet marker for live positions
+let data = { flights: [], vehicles: [], intents: [], past: [] };
+
+// ---------- auth: email one-time code ----------
+const showErr = (m) => ($("err").textContent = m || "");
+let pendingEmail = "";
+
+if (location.protocol === "file:") {
+  showErr("Open this page through its local address instead: run `npm run admin`, then go to http://localhost:8090");
+  $("sendBtn").disabled = true;
+}
+
+$("stepEmail").onsubmit = async (e) => {
+  e.preventDefault();
+  showErr("");
+  const email = $("email").value.trim().toLowerCase();
+  if (email !== ADMIN_EMAIL) return showErr("This email is not allowed to access the admin site.");
+  $("sendBtn").disabled = true;
+  // shouldCreateUser:false — never creates an account; only an existing user gets a code.
+  const { error } = await supabase.auth.signInWithOtp({
+    email, options: { shouldCreateUser: false, emailRedirectTo: location.origin + location.pathname },
+  });
+  $("sendBtn").disabled = false;
+  if (error) return showErr(error.message);
+  pendingEmail = email;
+  $("sentTo").textContent = email;
+  $("stepEmail").hidden = true;
+  $("stepCode").hidden = false;
+  $("code").focus();
+};
+
+$("stepCode").onsubmit = async (e) => {
+  e.preventDefault();
+  showErr("");
+  $("verifyBtn").disabled = true;
+  const { error } = await supabase.auth.verifyOtp({ email: pendingEmail, token: $("code").value.trim(), type: "email" });
+  $("verifyBtn").disabled = false;
+  if (error) return showErr(error.message);
+  start();
+};
+
+$("backBtn").onclick = () => { $("stepCode").hidden = true; $("stepEmail").hidden = false; $("code").value = ""; showErr(""); };
+$("logout").onclick = async () => { await supabase.auth.signOut(); location.reload(); };
+
+// Returning from the emailed link: supabase-js reads the session from the URL, then we tidy the URL.
+const { data: { session } } = await supabase.auth.getSession();
+if (location.hash.includes("access_token") || location.hash.includes("error")) {
+  const err = new URLSearchParams(location.hash.slice(1)).get("error_description");
+  if (err) showErr(err);
+  history.replaceState(null, "", location.pathname);
+}
+if (session) start();
+
+async function start() {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return;
+  me = user.id;
+  // Ask the database (the real gate): admin account + email-code session from the last 24 h.
+  const { data: ok, error } = await supabase.rpc("is_admin");
+  if (error || ok !== true) {
+    await supabase.auth.signOut();
+    $("stepCode").hidden = true; $("stepEmail").hidden = false;
+    showErr(error ? error.message : "Access denied. Sign in with an email code from the admin account.");
+    return;
+  }
+
+  $("login").hidden = true;
+  $("side").hidden = false;
+  $("mapDiv").hidden = false;
+
+  map = L.map("mapDiv").setView([40.735, -74.33], 13);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    attribution: "© OpenStreetMap contributors © CARTO", maxZoom: 19,
+  }).addTo(map);
+  overlay = L.layerGroup().addTo(map);
+
+  document.querySelectorAll("#tabs button").forEach((b) => b.onclick = () => {
+    document.querySelectorAll("#tabs button").forEach((x) => x.classList.remove("on"));
+    b.classList.add("on");
+    currentTab = b.dataset.tab;
+    render();
+  });
+
+  await loadAll();
+
+  supabase.channel("admin-live")
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "location_pings" }, (p) => onTrackerPing(p.new))
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "flight_telemetry" }, (p) => onSiteTelemetry(p.new))
+    .on("postgres_changes", { event: "*", schema: "public", table: "flights" }, () => loadAll())
+    .on("postgres_changes", { event: "*", schema: "public", table: "flight_intents" }, () => loadAll())
+    .subscribe();
+}
+
+// ---------- data ----------
+async function loadAll() {
+  const [f, v, i, p] = await Promise.all([
+    supabase.from("flights").select("id, status, started_at, ended_at, vehicle_id, vehicles(name)").order("started_at", { ascending: false }),
+    supabase.from("vehicles").select("id, name, device_token, created_at, owner_user_id, aircraft_id").order("created_at", { ascending: false }),
+    supabase.from("flight_intents").select("id, aircraft_id, operator_name, origin, destination, status, in_air_at, landed_at, last_telemetry_at, origin_lat, origin_lon, dest_lat, dest_lon, created_at").order("created_at", { ascending: false }),
+    supabase.from("past_flights").select("id, flight_intent_id, aircraft_id, operator_name, origin, destination, origin_lat, origin_lon, dest_lat, dest_lon, final_status, actual_departure_at, actual_arrival_at, filed_at, telemetry_points").order("filed_at", { ascending: false }),
+  ]);
+  for (const r of [f, v, i, p]) if (r.error) console.error(r.error);
+  data = { flights: f.data || [], vehicles: v.data || [], intents: i.data || [], past: p.data || [] };
+
+  // latest position for each active tracker flight
+  for (const fl of data.flights.filter((x) => x.status === "active")) {
+    const { data: last } = await supabase.from("location_pings").select("*").eq("flight_id", fl.id).order("created_at", { ascending: false }).limit(1);
+    if (last?.[0]) onTrackerPing(last[0], true);
+  }
+  // latest position for each active site flight
+  for (const it of activeIntents()) {
+    const { data: last } = await supabase.from("flight_telemetry").select("*").eq("flight_intent_id", it.id).order("recorded_at", { ascending: false }).limit(1);
+    if (last?.[0]) onSiteTelemetry(last[0], true);
+  }
+  // remove markers for flights that are no longer active
+  const liveKeys = new Set([...data.flights.filter((x) => x.status === "active").map((x) => "t:" + x.id), ...activeIntents().map((x) => "s:" + x.id)]);
+  for (const k of Object.keys(markers)) if (!liveKeys.has(k)) { markers[k].remove(); delete markers[k]; }
+
+  render();
+}
+
+const DONE = ["archived", "landed", "completed", "cancelled", "canceled", "expired", "rejected"];
+function activeIntents() {
+  return data.intents.filter((x) => !DONE.includes(String(x.status).toLowerCase()) && !x.landed_at);
+}
+
+// coordinates are sometimes stored in text like "39 Hemlock Rd @ 40.72,-74.34"
+function coords(lat, lon, text) {
+  if (lat != null && lon != null) return [lat, lon];
+  const m = String(text || "").match(/@\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
+  return m ? [parseFloat(m[1]), parseFloat(m[2])] : null;
+}
+const place = (text) => esc(String(text || "").split("@")[0].trim() || "Unknown");
+
+// ---------- live markers ----------
+const dot = (color) => L.divIcon({ className: "", html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 0 10px ${color}"></div>`, iconSize: [14, 14], iconAnchor: [7, 7] });
+
+function setMarker(key, lat, lng, color, html) {
+  if (!markers[key]) markers[key] = L.marker([lat, lng], { icon: dot(color) }).addTo(map).bindPopup(html);
+  else markers[key].setLatLng([lat, lng]).setPopupContent(html);
+}
+
+function onTrackerPing(p, quiet) {
+  const fl = data.flights.find((x) => x.id === p.flight_id);
+  if (fl && fl.status !== "active") return;
+  const name = fl?.vehicles?.name || "Tracker";
+  setMarker("t:" + p.flight_id, p.lat, p.lng, "#3ecf8e",
+    `<b>${esc(name)}</b><br>Alt: ${p.altitude ?? "?"} · Speed: ${p.speed ?? "?"}<br><small>${fmt(p.created_at)}</small>`);
+  if (!quiet && fl) { fl._last = p.created_at; if (currentTab === "live") render(); }
+}
+
+function onSiteTelemetry(t, quiet) {
+  const it = data.intents.find((x) => x.id === t.flight_intent_id);
+  setMarker("s:" + t.flight_intent_id, t.lat, t.lon, "#4c8dff",
+    `<b>${esc(it?.aircraft_id || "Site flight")}</b> <small>(${t.source === "tracker" ? "tracker" : "phone GPS"})</small><br>${it ? place(it.origin) + " → " + place(it.destination) : ""}<br>Alt: ${t.altitude_m ?? "?"} m · Speed: ${t.speed_ms ?? "?"} m/s<br><small>${fmt(t.recorded_at)}</small>`);
+  if (!quiet && it) { it.last_telemetry_at = t.recorded_at; if (currentTab === "live") render(); }
+}
+
+// ---------- routes ----------
+async function showTrackerRoute(flightId) {
+  const { data: pts } = await supabase.from("location_pings").select("lat, lng").eq("flight_id", flightId).order("created_at").limit(5000);
+  drawLine((pts || []).map((p) => [p.lat, p.lng]), "#3ecf8e");
+}
+async function showSiteRoute(intentId, o, d) {
+  const { data: pts } = await supabase.from("flight_telemetry").select("lat, lon").eq("flight_intent_id", intentId).order("recorded_at").limit(5000);
+  const line = (pts || []).map((p) => [p.lat, p.lon]);
+  overlay.clearLayers();
+  if (o) L.circleMarker(o, { radius: 7, color: "#f5a524" }).addTo(overlay).bindTooltip("Origin");
+  if (d) L.circleMarker(d, { radius: 7, color: "#f0506e" }).addTo(overlay).bindTooltip("Destination");
+  if (o && d) L.polyline([o, d], { color: "#8a91a0", dashArray: "6 6", weight: 2 }).addTo(overlay);
+  if (line.length) L.polyline(line, { color: "#4c8dff", weight: 4 }).addTo(overlay);
+  const all = [...line, ...(o ? [o] : []), ...(d ? [d] : [])];
+  if (all.length) map.fitBounds(L.latLngBounds(all).pad(0.3));
+  else alert("No coordinates stored for this flight.");
+}
+function drawLine(pts, color) {
+  overlay.clearLayers();
+  if (!pts.length) return alert("No pings for this flight yet.");
+  L.polyline(pts, { color, weight: 4 }).addTo(overlay);
+  L.circleMarker(pts[0], { radius: 6, color: "#f5a524" }).addTo(overlay).bindTooltip("Start");
+  map.fitBounds(L.latLngBounds(pts).pad(0.3));
+}
+
+// ---------- admin actions ----------
+async function endFlight(id) {
+  if (!confirm("End this flight? Its tracker will stop being accepted until a new flight starts.")) return;
+  const { error } = await supabase.from("flights").update({ status: "completed", ended_at: new Date().toISOString() }).eq("id", id);
+  if (error) return alert(error.message);
+  loadAll();
+}
+async function startFlight(vehicleId) {
+  const { error } = await supabase.from("flights").insert({ vehicle_id: vehicleId });
+  if (error) return alert(error.message);
+  loadAll();
+}
+async function linkVehicle(v) {
+  const id = prompt(`Aircraft ID on the website for "${v.name}" (blank to unlink).\nPings will feed YOUR account's airborne flight with this aircraft ID.`, v.aircraft_id || "");
+  if (id === null) return;
+  const aircraft = id.trim();
+  const { error } = await supabase.from("vehicles")
+    .update({ aircraft_id: aircraft || null, owner_user_id: aircraft ? me : null }).eq("id", v.id);
+  if (error) return alert(error.message);
+  loadAll();
+}
+async function addVehicle() {
+  const name = $("newVeh").value.trim();
+  if (!name) return;
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const token = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const { error } = await supabase.from("vehicles").insert({ name, device_token: token });
+  if (error) return alert(error.message);
+  loadAll();
+}
+
+// ---------- render ----------
+function render() {
+  const activeT = data.flights.filter((x) => x.status === "active");
+  const activeS = activeIntents();
+  $("sActive").textContent = activeT.length + activeS.length;
+  $("sPast").textContent = data.flights.filter((x) => x.status !== "active").length + data.past.length;
+  $("sVeh").textContent = data.vehicles.length;
+
+  const L_ = $("list");
+  L_.innerHTML = "";
+  const section = (t) => { const d = document.createElement("div"); d.className = "section"; d.textContent = t; L_.appendChild(d); };
+  const empty = (t) => { const d = document.createElement("div"); d.className = "empty"; d.textContent = t; L_.appendChild(d); };
+  const card = (html, live, actions) => {
+    const d = document.createElement("div");
+    d.className = "card" + (live ? " live" : "");
+    d.innerHTML = html + `<div class="btns"></div>`;
+    for (const [label, fn, cls] of actions) { const b = document.createElement("button"); b.textContent = label; if (cls) b.className = cls; b.onclick = fn; d.querySelector(".btns").appendChild(b); }
+    L_.appendChild(d);
+  };
+
+  if (currentTab === "live") {
+    section("Tracker flights (ping endpoint)");
+    if (!activeT.length) empty("No active tracker flights.");
+    for (const f of activeT) card(
+      `<div class="row"><span class="name">${esc(f.vehicles?.name || "Tracker")}</span><span class="pill active">active</span></div>
+       <small>Started ${fmt(f.started_at)}${f._last ? " · last ping " + fmt(f._last) : ""}</small>`, true,
+      [["Locate", () => markers["t:" + f.id] ? (map.setView(markers["t:" + f.id].getLatLng(), 16), markers["t:" + f.id].openPopup()) : alert("No pings yet.")],
+       ["Route", () => showTrackerRoute(f.id)],
+       ["End flight", () => endFlight(f.id), "danger"]]);
+
+    section("Website flights");
+    if (!activeS.length) empty("No active flights on the website.");
+    for (const it of activeS) card(
+      `<div class="row"><span class="name">${esc(it.aircraft_id || "Aircraft")}</span><span class="pill active">${esc(it.status)}</span></div>
+       <small>${place(it.origin)} → ${place(it.destination)}</small>
+       <small>${esc(it.operator_name || "")} · last telemetry ${fmt(it.last_telemetry_at)}</small>`, true,
+      [["Locate", () => markers["s:" + it.id] ? (map.setView(markers["s:" + it.id].getLatLng(), 16), markers["s:" + it.id].openPopup()) : alert("No telemetry yet.")],
+       ["Route", () => showSiteRoute(it.id, coords(it.origin_lat, it.origin_lon, it.origin), coords(it.dest_lat, it.dest_lon, it.destination))]]);
+  }
+
+  if (currentTab === "past") {
+    section("Website flight history");
+    if (!data.past.length) empty("No past website flights.");
+    for (const p of data.past) card(
+      `<div class="row"><span class="name">${esc(p.aircraft_id || "Aircraft")}</span><span class="pill">${esc(p.final_status || "done")}</span></div>
+       <small>${place(p.origin)} → ${place(p.destination)}</small>
+       <small>${esc(p.operator_name || "")} · filed ${fmt(p.filed_at)}${p.telemetry_points ? " · " + p.telemetry_points + " pts" : ""}</small>`, false,
+      [["Show on map", () => showSiteRoute(p.flight_intent_id, coords(p.origin_lat, p.origin_lon, p.origin), coords(p.dest_lat, p.dest_lon, p.destination))]]);
+
+    section("Tracker flight history");
+    const doneT = data.flights.filter((x) => x.status !== "active");
+    if (!doneT.length) empty("No completed tracker flights yet.");
+    for (const f of doneT) card(
+      `<div class="row"><span class="name">${esc(f.vehicles?.name || "Tracker")}</span><span class="pill">${esc(f.status)}</span></div>
+       <small>${fmt(f.started_at)} → ${fmt(f.ended_at)}</small>`, false,
+      [["Show route", () => showTrackerRoute(f.id)]]);
+  }
+
+  if (currentTab === "trackers") {
+    section("Add a tracker device");
+    const add = document.createElement("div");
+    add.className = "add";
+    add.innerHTML = `<input id="newVeh" placeholder="Name, e.g. Car 2"><button class="primary" id="addVeh">Add</button>`;
+    L_.appendChild(add);
+    $("addVeh").onclick = addVehicle;
+
+    section("Devices");
+    if (!data.vehicles.length) empty("No trackers yet.");
+    for (const v of data.vehicles) {
+      const live = data.flights.find((f) => f.vehicle_id === v.id && f.status === "active");
+      const linked = v.owner_user_id && v.aircraft_id;
+      const linkedIntent = linked && activeIntents().find((i) => String(i.aircraft_id).trim().toUpperCase() === String(v.aircraft_id).trim().toUpperCase());
+      card(
+        `<div class="row"><span class="name">${esc(v.name)}</span><span class="pill ${live || linkedIntent ? "active" : ""}">${live ? "tracking" : linkedIntent ? "feeding site flight" : "idle"}</span></div>
+         <small>${linked ? `Linked to aircraft <b>${esc(v.aircraft_id)}</b>${v.owner_user_id === me ? " (your account)" : ""}: pings feed that pilot's airborne website flight.` : "Not linked to a website aircraft."}</small>
+         <small>POST ${esc(PING_URL)} · header X-Device-Token · body {"lat","lng","altitude" m,"speed" m/s}</small>
+         <div class="token">${esc(v.device_token)}</div>`, !!(live || linkedIntent),
+        [
+          ...(live ? [["End tracker flight", () => endFlight(live.id), "danger"]] : [["Start tracker flight", () => startFlight(v.id), "primary"]]),
+          ["Link aircraft…", () => linkVehicle(v)],
+          ["Copy token", () => navigator.clipboard.writeText(v.device_token).catch(() => {})],
+        ]);
+    }
+  }
+}
+</script>
+</body>
+</html>

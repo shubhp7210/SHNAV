@@ -9,7 +9,9 @@ import cesium from "vite-plugin-cesium";
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
   server: {
-    host: "::",
+    // localhost only: the dev server is not reachable from other devices on
+    // your network. Set DEV_HOST=:: to expose it on purpose (e.g. phone testing).
+    host: process.env.DEV_HOST ?? "localhost",
     port: 8080,
     hmr: {
       overlay: false,

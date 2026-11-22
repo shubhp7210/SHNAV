@@ -267,8 +267,50 @@ test("nightly pattern refresh keys on the place name, not the coordinate tag", a
   assert.equal(p[0].a, 80);
 });
 
+test("trackers: device token required, linked pings feed only the owner's airborne flight", async () => {
+  const tokA = "a".repeat(64), tokB = "b".repeat(64), tokC = "c".repeat(64);
+  const mine = await intent({ status: "in_air", aircraft: "TRK1" });
+  const theirs = await intent({ user: OTHER, status: "in_air", aircraft: "TRK2" });
+  await q(`INSERT INTO vehicles (name, device_token, owner_user_id, aircraft_id) VALUES
+             ('linked', $1, $3, 'trk1'), ('spoof', $2, $3, 'TRK2'), ('plain', $4, NULL, NULL)`, [tokA, tokB, USER, tokC]);
+  await q(`INSERT INTO flights (vehicle_id) SELECT id FROM vehicles WHERE name = 'plain'`);
+  const ping = async (tok, lat = 40.73, lng = -74.34) =>
+    (await q(`SELECT tracker_ping($1, $2, $3, 100, 20, 90, 5) r`, [tok, lat, lng])).rows[0].r;
+
+  assert.equal((await ping("x".repeat(64))).error, "bad_token");
+  assert.equal((await ping(tokC, 95)).error, "bad_position");
+  assert.ok((await ping(tokC)).tracker_flight_id);                       // plain tracker → location_pings
+  const linked = await ping(tokA);                                       // linked → owner's airborne flight
+  assert.equal(linked.intent_id, mine);
+  assert.equal(linked.telemetry.inserted, 1);
+  assert.equal((await ping(tokB)).error, "nothing_active");              // same aircraft id, other user's flight: ignored
+  assert.equal((await q(`SELECT count(*)::int n FROM flight_telemetry WHERE flight_intent_id = $1`, [theirs])).rows[0].n, 0);
+
+  // Only the service role may call it; only admins can see devices and pings.
+  await assert.rejects(asUser(USER, (c) => c.query(`SELECT tracker_ping($1, 1, 1)`, [tokA])), /permission denied/);
+  assert.equal((await asUser(USER, (c) => c.query(`SELECT count(*)::int n FROM vehicles`))).rows[0].n, 0);
+  await q(`INSERT INTO admins (user_id) VALUES ($1)`, [OTHER]);
+  // Admin access needs an email-code session (JWT amr = otp) from the last 24 h, not a password one.
+  const session = (method, ageS = 0) => async (c) => {
+    await c.query(`SELECT set_config('request.jwt.claims', $1, true)`,
+      [JSON.stringify({ sub: OTHER, amr: [{ method, timestamp: Math.floor(Date.now() / 1000) - ageS }] })]);
+    return (await c.query(`SELECT (SELECT count(*)::int FROM vehicles) v, (SELECT count(*)::int FROM location_pings) p`)).rows[0];
+  };
+  assert.deepEqual(await asUser(OTHER, session("password")), { v: 0, p: 0 });
+  assert.deepEqual(await asUser(OTHER, session("otp", 2 * 86400)), { v: 0, p: 0 });
+  const admin = await asUser(OTHER, session("otp"));
+  assert.equal(admin.v, 3);
+  assert.ok(admin.p >= 1);
+  await q(`DELETE FROM admins WHERE user_id = $1`, [OTHER]);
+  // Tracker fixes are tagged so the pilot's screen can tell them from its own phone GPS.
+  assert.equal((await q(`SELECT source FROM flight_telemetry WHERE flight_intent_id = $1`, [mine])).rows[0].source, "tracker");
+});
+
 test("rollback scripts revert cleanly and the migrations re-apply", async () => {
-  // Newest first: 20261115 depends on 20261102 columns.
+  // Newest first: 20261122* adds policies on 20261115 tables; 20261115 depends on 20261102 columns.
+  await q(sqlFile("rollback", "20261122000100_security_hardening.down.sql"));
+  await q(sqlFile("rollback", "20261122000000_admin_tracking.down.sql"));
+  assert.equal((await q(`SELECT to_regclass('public.vehicles') r`)).rows[0].r, null);
   await q(sqlFile("rollback", "20261115000000_data_platform.down.sql"));
   await q(sqlFile("migrations", "20261102000000_production_readiness.sql")); // restores the previous function bodies
   assert.equal((await q(`SELECT to_regclass('public.past_flights') r`)).rows[0].r, null);
@@ -282,4 +324,8 @@ test("rollback scripts revert cleanly and the migrations re-apply", async () => 
   await q(sqlFile("migrations", "20261115000000_data_platform.sql"));
   assert.notEqual((await q(`SELECT to_regclass('public.past_flights') r`)).rows[0].r, null);
   assert.equal((await q(`SELECT count(*)::int n FROM model_params WHERE status='active'`)).rows[0].n, 4);
+  await q(sqlFile("migrations", "20261122000000_admin_tracking.sql"));
+  await q(sqlFile("migrations", "20261122000100_security_hardening.sql"));
+  await q(sqlFile("migrations", "20261122000200_schema_descriptions.sql"));
+  assert.notEqual((await q(`SELECT to_regclass('public.vehicles') r`)).rows[0].r, null);
 });

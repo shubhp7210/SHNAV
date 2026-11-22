@@ -17,15 +17,32 @@ const rest = (path, init = {}) => fetch(`${URL_}/rest/v1/${path}`, { ...init, he
 // 1. Migration applied: anon must be DENIED (permission), not "table not found".
 for (const t of ["rate_limits", "error_events", "api_usage", "geocode_cache",
   // 2026-11-15 data platform: observations need sign-in; ops/learning tables are private.
-  "data_sources", "ingest_runs", "model_params", "record_corrections", "wx_verification", "wx_metar", "traffic_observations"]) {
+  "data_sources", "ingest_runs", "model_params", "record_corrections", "wx_verification", "wx_metar", "traffic_observations",
+  // 2026-11-22 admin tracking: never readable without signing in.
+  "admins", "vehicles", "flights", "location_pings"]) {
   const r = await rest(`${t}?select=*&limit=1`);
   const body = await r.text();
   check(`table ${t} exists and is private`, r.status === 401 || r.status === 403 || /permission denied/i.test(body), `${r.status} ${body.slice(0, 80)}`);
 }
 // 2. Privileged RPCs refuse the anon role.
-for (const fn of ["check_rate_limit", "reserve_airspace_slot", "record_flight_outcome_tx", "expire_stale_intents",
-  "ingest_claim", "ingest_telemetry", "finalize_flight", "apply_correction", "run_learning_cycle", "train_duration_calibration"]) {
-  const r = await rest(`rpc/${fn}`, { method: "POST", body: "{}" });
+// Pass each function's real parameter names (all null): with "{}" PostgREST cannot resolve the
+// overload and answers 404 "function not found" before it ever checks privileges, so the check
+// failed against a correctly locked-down production.
+const RPC_ARGS = {
+  check_rate_limit: ["p_user_id", "p_bucket", "p_limit", "p_window_seconds"],
+  reserve_airspace_slot: ["p_intent", "p_aircraft", "p_band", "p_start", "p_priority", "p_emergency"],
+  record_flight_outcome_tx: ["p_user", "p_intent", "p"],
+  expire_stale_intents: [],
+  ingest_claim: ["p_source", "p_force"],
+  ingest_telemetry: ["p_user", "p_intent", "p_points"],
+  finalize_flight: ["p_intent", "p_force"],
+  apply_correction: ["p_table", "p_id", "p_field", "p_value", "p_reason", "p_evidence", "p_actor"],
+  run_learning_cycle: [],
+  train_duration_calibration: [],
+  tracker_ping: ["p_token", "p_lat", "p_lng", "p_alt", "p_speed", "p_heading", "p_accuracy", "p_t"],
+};
+for (const [fn, args] of Object.entries(RPC_ARGS)) {
+  const r = await rest(`rpc/${fn}`, { method: "POST", body: JSON.stringify(Object.fromEntries(args.map((a) => [a, null]))) });
   const body = await r.text();
   check(`rpc ${fn} denied to anon`, r.status === 401 || r.status === 403 || /permission denied/i.test(body), `${r.status} ${body.slice(0, 80)}`);
 }
@@ -51,6 +68,14 @@ for (const fn of FUNCTIONS) {
 {
   const r = await fetch(`${URL_}/functions/v1/data-ingest`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
   check("data-ingest refuses calls without the internal secret", r.status === 403, `${r.status}`);
+}
+// 5c. Tracker intake: no JWT at the gateway, but no/unknown device token → 401.
+{
+  const none = await fetch(`${URL_}/functions/v1/ping`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  check("ping refuses calls without a device token", none.status === 401, `${none.status}`);
+  const bad = await fetch(`${URL_}/functions/v1/ping`, { method: "POST",
+    headers: { "Content-Type": "application/json", "X-Device-Token": "0".repeat(64) }, body: JSON.stringify({ lat: 0, lng: 0 }) });
+  check("ping refuses unknown device tokens", bad.status === 401, `${bad.status}`);
 }
 // 6. CORS is not wildcard and echoes only the allowed origin.
 {

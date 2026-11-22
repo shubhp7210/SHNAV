@@ -48,3 +48,8 @@ verify_jwt = false
 
 [functions.flight-telemetry]
 verify_jwt = true
+
+# Tracker devices (not users) POST positions here. They authenticate with their
+# X-Device-Token, checked in-code by tracker_ping(); there is no JWT to verify.
+[functions.ping]
+verify_jwt = false
