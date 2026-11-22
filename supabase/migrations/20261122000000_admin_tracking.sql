@@ -72,10 +72,20 @@ ALTER TABLE public.vehicles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.flights ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.location_pings ENABLE ROW LEVEL SECURITY;
 
+-- An admin request must come from (1) an account listed in admins, (2) whose session was opened
+-- with a one-time email code (JWT "amr" method otp/magiclink — a password session from the main
+-- site does NOT count), (3) within the last 24 hours. The admin site signs in with an email code.
 -- SECURITY DEFINER so policies can consult admins without exposing it or recursing through its RLS.
 CREATE OR REPLACE FUNCTION public.is_admin()
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  WITH claims AS (
+    SELECT coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb, '{}'::jsonb) -> 'amr' AS amr
+  )
   SELECT EXISTS (SELECT 1 FROM public.admins WHERE user_id = auth.uid())
+     AND EXISTS (
+       SELECT 1 FROM claims, jsonb_array_elements(CASE WHEN jsonb_typeof(claims.amr) = 'array' THEN claims.amr ELSE '[]'::jsonb END) AS a
+       WHERE a->>'method' IN ('otp', 'magiclink')
+         AND coalesce((a->>'timestamp')::bigint, 0) > extract(epoch FROM now()) - 86400)
 $$;
 REVOKE ALL ON FUNCTION public.is_admin() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.is_admin() TO authenticated, service_role;
@@ -141,7 +151,28 @@ BEGIN
   END IF;
 END $$;
 
--- ─── 4. tracker_ping(): one atomic entry point for devices ─────────────────
+-- ─── 4. Telemetry source: phone GPS vs tracker device ──────────────────────
+-- The website shows the pilot a linked tracker's position live; it needs to tell those fixes apart
+-- from its own phone GPS. tracker_ping() sets shnav.telemetry_source = 'tracker' for its transaction.
+CREATE OR REPLACE FUNCTION public.set_telemetry_source()
+RETURNS trigger LANGUAGE plpgsql SET search_path = public AS $$
+BEGIN
+  NEW.source := coalesce(nullif(current_setting('shnav.telemetry_source', true), ''), 'phone');
+  RETURN NEW;
+END $$;
+DO $$ BEGIN
+  IF to_regclass('public.flight_telemetry') IS NOT NULL THEN
+    ALTER TABLE public.flight_telemetry ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'phone';
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'flight_telemetry_source_check') THEN
+      ALTER TABLE public.flight_telemetry ADD CONSTRAINT flight_telemetry_source_check CHECK (source IN ('phone', 'tracker'));
+    END IF;
+    DROP TRIGGER IF EXISTS flight_telemetry_source ON public.flight_telemetry;
+    CREATE TRIGGER flight_telemetry_source BEFORE INSERT ON public.flight_telemetry
+      FOR EACH ROW EXECUTE FUNCTION public.set_telemetry_source();
+  END IF;
+END $$;
+
+-- ─── 5. tracker_ping(): one atomic entry point for devices ─────────────────
 -- Called only by the `ping` edge function (service role). Returns jsonb:
 --   { vehicle_id, tracker_flight_id|null, intent_id|null, telemetry|null }
 --   or { error: 'bad_token' | 'bad_position' | 'rate_limited' | 'nothing_active' }
@@ -182,12 +213,14 @@ BEGIN
       AND status IN ('in_air', 'active')
     ORDER BY coalesce(in_air_at, created_at) DESC LIMIT 1;
     IF v_intent IS NOT NULL THEN
+      PERFORM set_config('shnav.telemetry_source', 'tracker', true);
       v_tel := ingest_telemetry(v_intent_user, v_intent, jsonb_build_array(jsonb_strip_nulls(jsonb_build_object(
         't', to_char(v_t AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
         'lat', p_lat, 'lon', p_lng, 'alt', p_alt, 'spd', p_speed, 'hdg', p_heading, 'acc', p_accuracy))));
     END IF;
   END IF;
 
+  PERFORM set_config('shnav.telemetry_source', '', true);
   IF v_flight IS NULL AND v_intent IS NULL THEN
     RETURN jsonb_build_object('error', 'nothing_active', 'vehicle_id', v_vehicle.id);
   END IF;

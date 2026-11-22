@@ -7,6 +7,11 @@ DROP FUNCTION IF EXISTS public.tracker_ping(text, double precision, double preci
 DO $$
 DECLARE t text;
 BEGIN
+  IF to_regclass('public.flight_telemetry') IS NOT NULL THEN
+    DROP TRIGGER IF EXISTS flight_telemetry_source ON public.flight_telemetry;
+    ALTER TABLE public.flight_telemetry DROP CONSTRAINT IF EXISTS flight_telemetry_source_check;
+    ALTER TABLE public.flight_telemetry DROP COLUMN IF EXISTS source;
+  END IF;
   -- flight_intents / flight_telemetry stay in the publication: harmless, and the site may rely on them.
   FOREACH t IN ARRAY ARRAY['flights', 'location_pings'] LOOP
     IF EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = t) THEN
@@ -28,4 +33,5 @@ DROP TABLE IF EXISTS public.location_pings;
 DROP TABLE IF EXISTS public.flights;
 DROP TABLE IF EXISTS public.vehicles;
 DROP FUNCTION IF EXISTS public.is_admin();
+DROP FUNCTION IF EXISTS public.set_telemetry_source();
 DROP TABLE IF EXISTS public.admins;

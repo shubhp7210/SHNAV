@@ -290,13 +290,25 @@ test("trackers: device token required, linked pings feed only the owner's airbor
   await assert.rejects(asUser(USER, (c) => c.query(`SELECT tracker_ping($1, 1, 1)`, [tokA])), /permission denied/);
   assert.equal((await asUser(USER, (c) => c.query(`SELECT count(*)::int n FROM vehicles`))).rows[0].n, 0);
   await q(`INSERT INTO admins (user_id) VALUES ($1)`, [OTHER]);
-  assert.equal((await asUser(OTHER, (c) => c.query(`SELECT count(*)::int n FROM vehicles`))).rows[0].n, 3);
-  assert.ok((await asUser(OTHER, (c) => c.query(`SELECT count(*)::int n FROM location_pings`))).rows[0].n >= 1);
+  // Admin access needs an email-code session (JWT amr = otp) from the last 24 h, not a password one.
+  const session = (method, ageS = 0) => async (c) => {
+    await c.query(`SELECT set_config('request.jwt.claims', $1, true)`,
+      [JSON.stringify({ sub: OTHER, amr: [{ method, timestamp: Math.floor(Date.now() / 1000) - ageS }] })]);
+    return (await c.query(`SELECT (SELECT count(*)::int FROM vehicles) v, (SELECT count(*)::int FROM location_pings) p`)).rows[0];
+  };
+  assert.deepEqual(await asUser(OTHER, session("password")), { v: 0, p: 0 });
+  assert.deepEqual(await asUser(OTHER, session("otp", 2 * 86400)), { v: 0, p: 0 });
+  const admin = await asUser(OTHER, session("otp"));
+  assert.equal(admin.v, 3);
+  assert.ok(admin.p >= 1);
   await q(`DELETE FROM admins WHERE user_id = $1`, [OTHER]);
+  // Tracker fixes are tagged so the pilot's screen can tell them from its own phone GPS.
+  assert.equal((await q(`SELECT source FROM flight_telemetry WHERE flight_intent_id = $1`, [mine])).rows[0].source, "tracker");
 });
 
 test("rollback scripts revert cleanly and the migrations re-apply", async () => {
-  // Newest first: 20261122 adds policies on 20261115 tables; 20261115 depends on 20261102 columns.
+  // Newest first: 20261122* adds policies on 20261115 tables; 20261115 depends on 20261102 columns.
+  await q(sqlFile("rollback", "20261122000100_security_hardening.down.sql"));
   await q(sqlFile("rollback", "20261122000000_admin_tracking.down.sql"));
   assert.equal((await q(`SELECT to_regclass('public.vehicles') r`)).rows[0].r, null);
   await q(sqlFile("rollback", "20261115000000_data_platform.down.sql"));
@@ -313,5 +325,7 @@ test("rollback scripts revert cleanly and the migrations re-apply", async () => 
   assert.notEqual((await q(`SELECT to_regclass('public.past_flights') r`)).rows[0].r, null);
   assert.equal((await q(`SELECT count(*)::int n FROM model_params WHERE status='active'`)).rows[0].n, 4);
   await q(sqlFile("migrations", "20261122000000_admin_tracking.sql"));
+  await q(sqlFile("migrations", "20261122000100_security_hardening.sql"));
+  await q(sqlFile("migrations", "20261122000200_schema_descriptions.sql"));
   assert.notEqual((await q(`SELECT to_regclass('public.vehicles') r`)).rows[0].r, null);
 });

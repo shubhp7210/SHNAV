@@ -8,6 +8,7 @@
 <style>
   :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e6e8ee; --muted:#8a91a0; --green:#3ecf8e; --amber:#f5a524; --red:#f0506e; --blue:#4c8dff; }
   * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
   body { margin:0; font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); height:100vh; display:flex; }
   button { font:inherit; cursor:pointer; border:1px solid var(--line); background:#222733; color:var(--text); border-radius:6px; padding:5px 10px; font-size:12px; }
   button:hover { border-color:var(--muted); }
@@ -17,6 +18,9 @@
   #login { margin:auto; width:300px; display:flex; flex-direction:column; gap:10px; background:var(--panel); padding:28px; border-radius:12px; border:1px solid var(--line); }
   #login h2 { margin:0 0 6px; font-size:18px; }
   #err { color:var(--red); font-size:13px; min-height:16px; margin:0; }
+  #login form { display:flex; flex-direction:column; gap:10px; margin:0; }
+  #login .hint { color:var(--muted); font-size:13px; margin:0; line-height:1.4; }
+  #code { font-family:ui-monospace, monospace; font-size:20px; letter-spacing:.3em; text-align:center; }
   #side { width:360px; display:flex; flex-direction:column; border-right:1px solid var(--line); background:var(--panel); }
   #side header { padding:14px 16px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; }
   #side header h1 { font-size:15px; margin:0; }
@@ -48,9 +52,17 @@
 <body>
   <div id="login">
     <h2>SHNAV Flight Admin</h2>
-    <input id="email" type="email" placeholder="Email" autocomplete="username">
-    <input id="password" type="password" placeholder="Password" autocomplete="current-password">
-    <button class="primary" id="loginBtn">Log in</button>
+    <form id="stepEmail">
+      <p class="hint">Admin access only. We'll email you a one-time sign-in link (or code).</p>
+      <input id="email" type="email" placeholder="Admin email" autocomplete="username" required>
+      <button class="primary" type="submit" id="sendBtn">Email me a sign-in link</button>
+    </form>
+    <form id="stepCode" hidden>
+      <p class="hint">Check <b id="sentTo"></b>. Click the link in the email (open it in this browser), or type the code if the email shows one. It expires in a few minutes.</p>
+      <input id="code" inputmode="numeric" autocomplete="one-time-code" placeholder="Code" maxlength="10" required>
+      <button class="primary" type="submit" id="verifyBtn">Verify &amp; sign in</button>
+      <button type="button" id="backBtn">Use a different email</button>
+    </form>
     <p id="err"></p>
   </div>
 
@@ -81,7 +93,16 @@ const SUPABASE_URL = "https://jiagegvlehrawpxcrwsd.supabase.co";
 const SUPABASE_KEY = "sb_publishable_hig881cMPN3Q6KV2oWx1FA_YCoT8o5T"; // public key, safe in browser (RLS protects data)
 const PING_URL = SUPABASE_URL + "/functions/v1/ping";
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// Only this email can request a sign-in code. The real lock is in the database: data is only
+// returned when the account is in public.admins AND the session was opened with an email code
+// in the last 24 h (see is_admin()), so editing this page in the browser gets an attacker nothing.
+const ADMIN_EMAIL = "shubh.p7210@gmail.com";
+
+// sessionStorage: closing the tab signs you out.
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  // detectSessionInUrl: the emailed link returns here with the session in the URL.
+  auth: { storage: sessionStorage, persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: "implicit" },
+});
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 const fmt = (t) => t ? new Date(t).toLocaleString() : "—";
@@ -90,27 +111,66 @@ let map, overlay, currentTab = "live", me = null;
 const markers = {};          // key -> Leaflet marker for live positions
 let data = { flights: [], vehicles: [], intents: [], past: [] };
 
-// ---------- auth ----------
-$("loginBtn").onclick = login;
-$("password").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
-async function login() {
-  $("err").textContent = "";
-  const { error } = await supabase.auth.signInWithPassword({ email: $("email").value.trim(), password: $("password").value });
-  if (error) return ($("err").textContent = error.message);
-  start();
+// ---------- auth: email one-time code ----------
+const showErr = (m) => ($("err").textContent = m || "");
+let pendingEmail = "";
+
+if (location.protocol === "file:") {
+  showErr("Open this page through its local address instead: run `npm run admin`, then go to http://localhost:8090");
+  $("sendBtn").disabled = true;
 }
+
+$("stepEmail").onsubmit = async (e) => {
+  e.preventDefault();
+  showErr("");
+  const email = $("email").value.trim().toLowerCase();
+  if (email !== ADMIN_EMAIL) return showErr("This email is not allowed to access the admin site.");
+  $("sendBtn").disabled = true;
+  // shouldCreateUser:false — never creates an account; only an existing user gets a code.
+  const { error } = await supabase.auth.signInWithOtp({
+    email, options: { shouldCreateUser: false, emailRedirectTo: location.origin + location.pathname },
+  });
+  $("sendBtn").disabled = false;
+  if (error) return showErr(error.message);
+  pendingEmail = email;
+  $("sentTo").textContent = email;
+  $("stepEmail").hidden = true;
+  $("stepCode").hidden = false;
+  $("code").focus();
+};
+
+$("stepCode").onsubmit = async (e) => {
+  e.preventDefault();
+  showErr("");
+  $("verifyBtn").disabled = true;
+  const { error } = await supabase.auth.verifyOtp({ email: pendingEmail, token: $("code").value.trim(), type: "email" });
+  $("verifyBtn").disabled = false;
+  if (error) return showErr(error.message);
+  start();
+};
+
+$("backBtn").onclick = () => { $("stepCode").hidden = true; $("stepEmail").hidden = false; $("code").value = ""; showErr(""); };
 $("logout").onclick = async () => { await supabase.auth.signOut(); location.reload(); };
 
+// Returning from the emailed link: supabase-js reads the session from the URL, then we tidy the URL.
 const { data: { session } } = await supabase.auth.getSession();
+if (location.hash.includes("access_token") || location.hash.includes("error")) {
+  const err = new URLSearchParams(location.hash.slice(1)).get("error_description");
+  if (err) showErr(err);
+  history.replaceState(null, "", location.pathname);
+}
 if (session) start();
 
 async function start() {
   const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return;
   me = user.id;
-  const { data: adminRow } = await supabase.from("admins").select("user_id").eq("user_id", user.id).maybeSingle();
-  if (!adminRow) {
+  // Ask the database (the real gate): admin account + email-code session from the last 24 h.
+  const { data: ok, error } = await supabase.rpc("is_admin");
+  if (error || ok !== true) {
     await supabase.auth.signOut();
-    $("err").textContent = "This account is not an admin.";
+    $("stepCode").hidden = true; $("stepEmail").hidden = false;
+    showErr(error ? error.message : "Access denied. Sign in with an email code from the admin account.");
     return;
   }
 
@@ -202,7 +262,7 @@ function onTrackerPing(p, quiet) {
 function onSiteTelemetry(t, quiet) {
   const it = data.intents.find((x) => x.id === t.flight_intent_id);
   setMarker("s:" + t.flight_intent_id, t.lat, t.lon, "#4c8dff",
-    `<b>${esc(it?.aircraft_id || "Site flight")}</b><br>${it ? place(it.origin) + " → " + place(it.destination) : ""}<br>Alt: ${t.altitude_m ?? "?"} m · Speed: ${t.speed_ms ?? "?"} m/s<br><small>${fmt(t.recorded_at)}</small>`);
+    `<b>${esc(it?.aircraft_id || "Site flight")}</b> <small>(${t.source === "tracker" ? "tracker" : "phone GPS"})</small><br>${it ? place(it.origin) + " → " + place(it.destination) : ""}<br>Alt: ${t.altitude_m ?? "?"} m · Speed: ${t.speed_ms ?? "?"} m/s<br><small>${fmt(t.recorded_at)}</small>`);
   if (!quiet && it) { it.last_telemetry_at = t.recorded_at; if (currentTab === "live") render(); }
 }
 
