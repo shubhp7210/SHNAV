@@ -1,0 +1,61 @@
+name: Sync ingestion secret
+
+# Makes scheduled ingestion work: copies the INTERNAL_FUNCTION_SECRET GitHub secret into
+#   1. the Supabase edge-function secret of the same name (what data-ingest checks), and
+#   2. app_private.settings (what pg_cron's dispatch_ingest() sends),
+# using only the Supabase Management API (SUPABASE_ACCESS_TOKEN). Nobody ever sees the value.
+# Safe to re-run any time (Actions → "Sync ingestion secret" → Run workflow).
+on:
+  workflow_dispatch:
+  push:
+    branches: [ops/sync-ingestion]
+
+concurrency:
+  group: supabase-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SECRET: ${{ secrets.INTERNAL_FUNCTION_SECRET }}
+      REF: jiagegvlehrawpxcrwsd
+      API: https://api.supabase.com/v1/projects/jiagegvlehrawpxcrwsd
+    steps:
+      - name: Check the two GitHub secrets exist
+        run: |
+          missing=""
+          [ -n "$SUPABASE_ACCESS_TOKEN" ] || missing="$missing SUPABASE_ACCESS_TOKEN"
+          [ -n "$SECRET" ] || missing="$missing INTERNAL_FUNCTION_SECRET"
+          [ -z "$missing" ] || { echo "::error::Missing GitHub secrets:$missing"; exit 1; }
+          # A short fingerprint (not the secret) so it can be compared with Supabase's digest column.
+          echo "INTERNAL_FUNCTION_SECRET sha256 starts with: $(printf %s "$SECRET" | sha256sum | cut -c1-12)"
+
+      - name: Set the Supabase edge-function secret
+        run: |
+          jq -n --arg v "$SECRET" '[{name: "INTERNAL_FUNCTION_SECRET", value: $v}]' |
+            curl -fsS -X POST "$API/secrets" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+                 -H "Content-Type: application/json" --data @- -o /dev/null -w "secrets API: HTTP %{http_code}\n"
+
+      - name: Store it for pg_cron and start ingestion
+        run: |
+          case "$SECRET" in *'$sv$'*) echo "::error::secret contains the quote tag"; exit 1;; esac
+          sql="INSERT INTO app_private.settings (key, value) VALUES
+                 ('functions_base_url', 'https://$REF.supabase.co/functions/v1'),
+                 ('internal_function_secret', \$sv\$$SECRET\$sv\$)
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+               SELECT public.dispatch_ingest() AS dispatch;"
+          jq -n --arg q "$sql" '{query: $q}' |
+            curl -fsS -X POST "$API/database/query" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+                 -H "Content-Type: application/json" --data @- | jq -c '.[0] // .'
+
+      - name: Wait, then show what was ingested
+        run: |
+          sleep 75
+          q="SELECT source_id, status, records_inserted, left(coalesce(error, ''), 120) AS error
+             FROM public.ingest_runs WHERE started_at > now() - interval '5 minutes' ORDER BY started_at DESC LIMIT 20;"
+          jq -n --arg q "$q" '{query: $q}' |
+            curl -fsS -X POST "$API/database/query" -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+                 -H "Content-Type: application/json" --data @- | jq -r '.[] | [.source_id, .status, (.records_inserted|tostring), .error] | @tsv'
