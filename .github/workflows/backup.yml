@@ -77,7 +77,7 @@ jobs:
         run: node scripts/backup-verify.mjs --counts counts.json --restored "$RESTORE_URL" --schemas public,app_private
 
       - name: Encrypt
-        env: { BACKUP_PASSPHRASE: "${{ secrets.BACKUP_PASSPHRASE }}" }
+        env: { BACKUP_PASSPHRASE: "${{ secrets.BACKUP_PASSPHRASE || secrets.BACKUP_SHNAV }}" }
         run: |
           gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
             --symmetric --cipher-algo AES256 -o "backup-$(date -u +%Y%m%dT%H%MZ).dump.gpg" backup.dump

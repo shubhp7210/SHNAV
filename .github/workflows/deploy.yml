@@ -34,6 +34,7 @@ jobs:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
       PROJECT_ID: jiagegvlehrawpxcrwsd
+      HAS_INTERNAL_SECRET: ${{ secrets.INTERNAL_FUNCTION_SECRET != '' }}
       # Origins allowed to call the edge functions. Until the site has a real domain, the local
       # app and admin site. When you deploy, add an ALLOWED_ORIGINS secret (comma-separated URLs).
       ALLOWED_ORIGINS: ${{ secrets.ALLOWED_ORIGINS || 'http://localhost:8080,http://localhost:8090' }}
@@ -45,13 +46,17 @@ jobs:
       - name: Preflight — required secrets
         env:
           INTERNAL_FUNCTION_SECRET: ${{ secrets.INTERNAL_FUNCTION_SECRET }}
-          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE || secrets.BACKUP_SHNAV }}
         run: |
           missing=""
-          for v in SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD INTERNAL_FUNCTION_SECRET BACKUP_PASSPHRASE; do
+          for v in SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD BACKUP_PASSPHRASE; do
             [ -n "${!v}" ] || missing="$missing $v"
           done
           [ -z "$missing" ] || { echo "::error::Missing secrets:$missing"; exit 1; }
+          # Optional: when set, it replaces the function secret + pg_cron copy; when not, the
+          # values already in Supabase are kept (they match each other).
+          [ -n "$INTERNAL_FUNCTION_SECRET" ] && echo "INTERNAL_FUNCTION_SECRET: will be synced" \
+            || echo "INTERNAL_FUNCTION_SECRET: not in GitHub — keeping Supabase's current value"
           echo "CORS allowed origins: $ALLOWED_ORIGINS"
 
       # The pooled connection string is built from SUPABASE_DB_PASSWORD, so no separate
@@ -81,7 +86,7 @@ jobs:
 
       - name: Pre-deploy backup (rollback point)
         env:
-          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE || secrets.BACKUP_SHNAV }}
         run: |
           /usr/lib/postgresql/17/bin/pg_dump "$SUPABASE_DB_URL" -Fc --no-owner --no-privileges \
             --schema=public --schema=app_private -f predeploy.dump
@@ -105,14 +110,19 @@ jobs:
           supabase db push
 
       - name: Function secrets
+        env:
+          INTERNAL_FUNCTION_SECRET: ${{ secrets.INTERNAL_FUNCTION_SECRET }}
         run: |
-          supabase secrets set \
-            ALLOWED_ORIGINS="$ALLOWED_ORIGINS" \
-            INTERNAL_FUNCTION_SECRET="${{ secrets.INTERNAL_FUNCTION_SECRET }}"
+          if [ -n "$INTERNAL_FUNCTION_SECRET" ]; then
+            supabase secrets set ALLOWED_ORIGINS="$ALLOWED_ORIGINS" INTERNAL_FUNCTION_SECRET="$INTERNAL_FUNCTION_SECRET"
+          else
+            supabase secrets set ALLOWED_ORIGINS="$ALLOWED_ORIGINS"
+          fi
 
       # Scheduled ingestion (pg_cron → data-ingest) authenticates with the same secret the
       # functions check. Keep the database copy in sync with GitHub so they can never drift.
       - name: Ingestion settings (keeps app_private.settings in sync)
+        if: ${{ env.HAS_INTERNAL_SECRET == 'true' }}
         env:
           INTERNAL_FUNCTION_SECRET: ${{ secrets.INTERNAL_FUNCTION_SECRET }}
         run: |
