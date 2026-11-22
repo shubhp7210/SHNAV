@@ -136,7 +136,8 @@ jobs:
       - name: Post-deploy verification (live, read-only)
         env:
           SUPABASE_URL: https://jiagegvlehrawpxcrwsd.supabase.co
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # Publishable (public) key: safe to keep in the repo; a SUPABASE_ANON_KEY secret overrides it.
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || 'sb_publishable_hig881cMPN3Q6KV2oWx1FA_YCoT8o5T' }}
         run: |
           export ALLOWED_ORIGIN="$(echo "$ALLOWED_ORIGINS" | cut -d, -f1)"
           node scripts/verify-production.mjs
