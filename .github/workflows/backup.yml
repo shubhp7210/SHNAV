@@ -16,6 +16,7 @@ concurrency:
 jobs:
   backup:
     runs-on: ubuntu-latest
+    environment: production   # same secrets as the deploy (SUPABASE_DB_PASSWORD, BACKUP_PASSPHRASE)
     services:
       restore:
         image: postgres:17
@@ -24,13 +25,27 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       RESTORE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - run: npm ci
+
+      # The pooled connection string is built from SUPABASE_DB_PASSWORD, so no separate
+      # SUPABASE_DB_URL secret is needed (one is still used if you add it).
+      - name: Database connection (session pooler)
+        env:
+          SECRET_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          if [ -n "$SECRET_DB_URL" ]; then url="$SECRET_DB_URL"
+          elif [ -n "$DB_PASSWORD" ]; then
+            enc=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["DB_PASSWORD"], safe=""))')
+            url="postgresql://postgres.jiagegvlehrawpxcrwsd:${enc}@aws-1-us-west-2.pooler.supabase.com:5432/postgres?sslmode=require"
+          else echo "::error::Add the SUPABASE_DB_PASSWORD (or SUPABASE_DB_URL) GitHub secret"; exit 1; fi
+          echo "::add-mask::$url"
+          echo "SUPABASE_DB_URL=$url" >> "$GITHUB_ENV"
 
       - name: Install PostgreSQL 17 client
         run: |
@@ -62,7 +77,7 @@ jobs:
         run: node scripts/backup-verify.mjs --counts counts.json --restored "$RESTORE_URL" --schemas public,app_private
 
       - name: Encrypt
-        env: { BACKUP_PASSPHRASE: "${{ secrets.BACKUP_PASSPHRASE }}" }
+        env: { BACKUP_PASSPHRASE: "${{ secrets.BACKUP_PASSPHRASE || secrets.BACKUP_SHNAV }}" }
         run: |
           gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
             --symmetric --cipher-algo AES256 -o "backup-$(date -u +%Y%m%dT%H%MZ).dump.gpg" backup.dump

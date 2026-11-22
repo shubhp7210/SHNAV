@@ -1,0 +1,35 @@
+name: Publish admin site
+
+# Copies admin/index.html to the gh-pages branch, which GitHub Pages serves at
+#   https://shubhp7210.github.io/SHNAV/admin/
+# Runs when the admin site changes on main (or manually).
+on:
+  push:
+    branches: [main]
+    paths: ["admin/index.html"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-admin
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update gh-pages
+        run: |
+          git fetch --depth=1 origin gh-pages
+          git worktree add /tmp/site FETCH_HEAD
+          mkdir -p /tmp/site/admin
+          cp admin/index.html /tmp/site/admin/index.html
+          cd /tmp/site
+          git add -A
+          if git diff --cached --quiet; then echo "Admin site already up to date"; exit 0; fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Publish admin site from ${GITHUB_SHA::7}"
+          git push origin HEAD:gh-pages

@@ -1,0 +1,56 @@
+name: Sync ingestion secret
+
+# Makes scheduled ingestion work: writes the INTERNAL_FUNCTION_SECRET GitHub secret (the same value the
+# edge functions check) into app_private.settings, which pg_cron's dispatch_ingest() sends to data-ingest.
+# Connects with SUPABASE_DB_PASSWORD through the session pooler. Nobody ever sees the value.
+# Safe to re-run any time (Actions → "Sync ingestion secret" → Run workflow).
+on:
+  workflow_dispatch:
+  push:
+    branches: [ops/sync-ingestion]
+
+concurrency:
+  group: supabase-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SECRET: ${{ secrets.INTERNAL_FUNCTION_SECRET }}
+      PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      # Session pooler (IPv4) — Supabase → Connect → Session pooler.
+      PGHOST: aws-1-us-west-2.pooler.supabase.com
+      PGPORT: "5432"
+      PGUSER: postgres.jiagegvlehrawpxcrwsd
+      PGDATABASE: postgres
+      PGSSLMODE: require
+    steps:
+      - name: Check the GitHub secrets exist
+        run: |
+          missing=""
+          [ -n "$SECRET" ] || missing="$missing INTERNAL_FUNCTION_SECRET"
+          [ -n "$PGPASSWORD" ] || missing="$missing SUPABASE_DB_PASSWORD"
+          [ -z "$missing" ] || { echo "::error::Missing GitHub secrets:$missing"; exit 1; }
+          # Fingerprint (not the secret): compare with the DIGEST column in Supabase → Edge Functions → Secrets.
+          echo "INTERNAL_FUNCTION_SECRET sha256 starts with: $(printf %s "$SECRET" | sha256sum | cut -c1-12)"
+
+      - name: Store it for pg_cron and start ingestion
+        run: |
+          psql -v ON_ERROR_STOP=1 -q -v secret="$SECRET" <<'SQL'
+          INSERT INTO app_private.settings (key, value) VALUES
+            ('functions_base_url', 'https://jiagegvlehrawpxcrwsd.supabase.co/functions/v1'),
+            ('internal_function_secret', :'secret')
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+          SELECT public.dispatch_ingest() AS dispatch;
+          SQL
+
+      - name: Wait, then show what was ingested
+        run: |
+          sleep 90
+          psql -v ON_ERROR_STOP=1 -P pager=off <<'SQL'
+          SELECT source_id, status, records_inserted, left(coalesce(error, ''), 100) AS error
+          FROM public.ingest_runs WHERE started_at > now() - interval '5 minutes' ORDER BY started_at DESC LIMIT 20;
+          SELECT id, freshness, last_success_at FROM public.data_source_status ORDER BY id;
+          SQL
