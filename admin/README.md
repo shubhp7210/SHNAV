@@ -3,15 +3,15 @@
 A private admin website, **separate from the main app**: live map of every active tracker and
 website flight, flight history with routes, and tracker management.
 
-## Run it
+## Open it
 
-```bash
-npm run admin        # → http://localhost:8090   (the main app stays on http://localhost:8080)
-```
+**Online:** https://shubhp7210.github.io/SHNAV/admin/ (GitHub Pages, `gh-pages` branch).
+The "Publish admin site" workflow republishes it whenever `admin/index.html` changes on `main`.
 
-It is a single file (`index.html`), not part of the main app's build, so it can later be hosted on
-its own domain (any static host). If you do, add that address to Supabase → Authentication →
-URL Configuration → Redirect URLs.
+**Locally (optional):** `npm run admin` → http://localhost:8090 (the main app stays on :8080).
+
+It is a single file, not part of the main app's build. Every address it runs on must be listed in
+Supabase → Authentication → URL Configuration → Redirect URLs (both of the above already are).
 
 ## Signing in (owner only)
 

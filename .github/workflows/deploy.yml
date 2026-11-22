@@ -34,6 +34,9 @@ jobs:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
       PROJECT_ID: jiagegvlehrawpxcrwsd
+      # Origins allowed to call the edge functions. Until the site has a real domain, the local
+      # app and admin site. When you deploy, add an ALLOWED_ORIGINS secret (comma-separated URLs).
+      ALLOWED_ORIGINS: ${{ secrets.ALLOWED_ORIGINS || 'http://localhost:8080,http://localhost:8090' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,17 +44,30 @@ jobs:
 
       - name: Preflight — required secrets
         env:
-          ALLOWED_ORIGINS: ${{ secrets.ALLOWED_ORIGINS }}
           INTERNAL_FUNCTION_SECRET: ${{ secrets.INTERNAL_FUNCTION_SECRET }}
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           missing=""
-          for v in SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD ALLOWED_ORIGINS INTERNAL_FUNCTION_SECRET BACKUP_PASSPHRASE SUPABASE_DB_URL; do
+          for v in SUPABASE_ACCESS_TOKEN SUPABASE_DB_PASSWORD INTERNAL_FUNCTION_SECRET BACKUP_PASSPHRASE; do
             [ -n "${!v}" ] || missing="$missing $v"
           done
-          # CORS fails closed: deploying without ALLOWED_ORIGINS would block the live site.
           [ -z "$missing" ] || { echo "::error::Missing secrets:$missing"; exit 1; }
+          echo "CORS allowed origins: $ALLOWED_ORIGINS"
+
+      # The pooled connection string is built from SUPABASE_DB_PASSWORD, so no separate
+      # SUPABASE_DB_URL secret is needed (one is still used if you add it).
+      - name: Database connection (session pooler)
+        env:
+          SECRET_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          if [ -n "$SECRET_DB_URL" ]; then url="$SECRET_DB_URL"
+          elif [ -n "$DB_PASSWORD" ]; then
+            enc=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["DB_PASSWORD"], safe=""))')
+            url="postgresql://postgres.jiagegvlehrawpxcrwsd:${enc}@aws-1-us-west-2.pooler.supabase.com:5432/postgres?sslmode=require"
+          else echo "::error::Add the SUPABASE_DB_PASSWORD (or SUPABASE_DB_URL) GitHub secret"; exit 1; fi
+          echo "::add-mask::$url"
+          echo "SUPABASE_DB_URL=$url" >> "$GITHUB_ENV"
 
       - uses: supabase/setup-cli@v1
         with: { version: latest }
@@ -65,7 +81,6 @@ jobs:
 
       - name: Pre-deploy backup (rollback point)
         env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
         run: |
           /usr/lib/postgresql/17/bin/pg_dump "$SUPABASE_DB_URL" -Fc --no-owner --no-privileges \
@@ -92,14 +107,13 @@ jobs:
       - name: Function secrets
         run: |
           supabase secrets set \
-            ALLOWED_ORIGINS="${{ secrets.ALLOWED_ORIGINS }}" \
+            ALLOWED_ORIGINS="$ALLOWED_ORIGINS" \
             INTERNAL_FUNCTION_SECRET="${{ secrets.INTERNAL_FUNCTION_SECRET }}"
 
       # Scheduled ingestion (pg_cron → data-ingest) authenticates with the same secret the
       # functions check. Keep the database copy in sync with GitHub so they can never drift.
       - name: Ingestion settings (keeps app_private.settings in sync)
         env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           INTERNAL_FUNCTION_SECRET: ${{ secrets.INTERNAL_FUNCTION_SECRET }}
         run: |
           /usr/lib/postgresql/17/bin/psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -q \
@@ -124,5 +138,5 @@ jobs:
           SUPABASE_URL: https://jiagegvlehrawpxcrwsd.supabase.co
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          export ALLOWED_ORIGIN="$(echo '${{ secrets.ALLOWED_ORIGINS }}' | cut -d, -f1)"
+          export ALLOWED_ORIGIN="$(echo "$ALLOWED_ORIGINS" | cut -d, -f1)"
           node scripts/verify-production.mjs
